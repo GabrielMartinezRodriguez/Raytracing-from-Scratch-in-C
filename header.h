@@ -10,7 +10,7 @@
 #include "libft/libft.h"
 #include "scene.h"
 
-
+int     loadScene(t_scene *scene);
 t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera);
 t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matrix3 matrix);
 t_intersection *squareCollision(t_rayo ray, t_square *sq);
@@ -59,4 +59,6 @@ double moduleVector(t_vect3 vector);
 t_vect3 pointRay(t_rayo ray, double lamda);
 double lowerNumber(t_tupla tupla);
 t_vect3 newVector(double x, double y, double z);
+t_vect3 addVector(t_vect3 vect1, t_vect3 vect2);
+double angleTwoVectors(t_vect3 vect1, t_vect3 vect2);
 #endif

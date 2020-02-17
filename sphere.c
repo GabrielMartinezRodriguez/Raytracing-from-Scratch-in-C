@@ -20,6 +20,6 @@ t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera)
     returned->object = esfera;
     returned->type = sphere;
     returned->lambda = lowerNumber(equation);
-    returned->normal = distanceVector(esfera->punto, pointRay(rayo, returned->lambda));
+    returned->normal = distanceVector(pointRay(rayo, returned->lambda), esfera->punto);
     return (returned);
 }

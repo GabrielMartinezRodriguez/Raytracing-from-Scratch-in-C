@@ -97,6 +97,15 @@ t_vect3 distanceVector(t_vect3 point1, t_vect3 point2)
     vect.z = point1.z - point2.z;
     return (vect);
 }
+t_vect3 addVector(t_vect3 vect1, t_vect3 vect2)
+{
+    t_vect3 vector;
+
+    vector.x = vect1.x + vect2.x;
+    vector.y = vect1.y + vect2.y;
+    vector.z = vect1.z + vect2.z;
+    return (vector);
+}
 double distancePoint(t_vect3 point1, t_vect3 point2)
 {
     double distance;
@@ -153,4 +162,15 @@ t_tupla vectorialSpaceSolution(t_vect3 origin, t_vect3 vect1, t_vect3 vect2, t_v
     solution.tamaño++;
     solution.tupla[1] = solution.tupla[1] = equation[0].tupla[0] * solution.tupla[0] + equation[0].tupla[1];
     return (solution);
+}
+double angleTwoVectors(t_vect3 vect1, t_vect3 vect2)
+{
+    double scalarProduct;
+    double cos;
+
+    scalarProduct += vect1.x * vect2.x + vect1.y * vect2.y + vect1.z * vect2.z;
+    cos = scalarProduct / (moduleVector(vect1) * moduleVector(vect2));
+    if(cos < -1 || cos > 1)
+        cos = cos;
+    return (cos);
 }
