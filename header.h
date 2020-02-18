@@ -8,6 +8,7 @@
 #include <math.h>
 #include "libx/mlx.h"
 #include "libft/libft.h"
+#include "get_next_line/get_next_line.h"
 #include "scene.h"
 
 int     loadScene(t_scene *scene);

@@ -144,12 +144,19 @@ typedef struct s_camera
         double  FOV_H;
 }               t_camera;
 
+typedef struct s_resolution
+{
+        int     x;
+        int     y;
+}              t_resolution;
+
 typedef struct s_scene
 {
         t_list_obj      *objets;
         t_list_light    *lights;
         t_light_environmental env_light;
         t_camera        camera;
+        t_resolution    resolution;
 }               t_scene;
 
 /*INTERSECTION WITH OBJECT*/
