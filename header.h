@@ -11,7 +11,7 @@
 #include "get_next_line/get_next_line.h"
 #include "scene.h"
 
-int     loadScene(t_scene *scene);
+int loadScene(t_scene *scene, char *fileName);
 t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera);
 t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matrix3 matrix);
 t_intersection *squareCollision(t_rayo ray, t_square *sq);

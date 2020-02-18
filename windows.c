@@ -60,7 +60,7 @@ int main()
     tri.point3.z = 70;
 
 
-    sq.point.x = 10;
+    sq.point.x = 3;
     sq.point.y = 10;
     sq.point.z = 30;
     sq.height = 10;
@@ -71,11 +71,11 @@ int main()
     cyl.diameter = 20;
     cyl.height = 30;
     cyl.point.y = 0;
-    cyl.point.x = 0;
+    cyl.point.x = 5;
     cyl.point.z = 30;
     cyl.normal.x = 1;
     cyl.normal.y = 0;
-    cyl.normal.z = -1;
+    cyl.normal.z = 1;
 
     pl.point.x = 0;
     pl.point.y = 0;
@@ -105,7 +105,7 @@ int main()
             ray.punto.x = 0;
             ray.punto.y = 0;
             ray.punto.z = 0;
-            inter1 = sphereCollision(ray, &sphere);
+            inter1 = cylinderCollision(ray, &cyl);
             inter2 = planeCollision(ray, &pl);
             inter = returnNear(inter1, inter2);
 
@@ -117,15 +117,15 @@ int main()
                 shader2 = NULL;
                 ray.punto = addVector(pointRay(ray, inter->lambda), changeLenght(inter->normal, 0.001));
                 ray.vector = distanceVector(scene.lights->point.point, ray.punto);
-                shader1 = sphereCollision(ray, &sphere);
+                shader1 = cylinderCollision(ray, &cyl);
                 shader2 = planeCollision(ray, &pl);
                 shader = returnNear(shader1, shader2);
                 if(inter1 == inter && shader != NULL)
-                    mlx_pixel_put(ptr, win_ptr, i, j, 0xE6ff0000);
+                    mlx_pixel_put(ptr, win_ptr, i, j, 0xD6ff0000);
                 else if(inter1 == inter)
                     i = i;
                 if(inter2 == inter && shader != NULL)
-                    mlx_pixel_put(ptr, win_ptr, i, j, 0xE600ff00);
+                    mlx_pixel_put(ptr, win_ptr, i, j, 0xD600ff00);
                 if(!shader)
                 {
                     color1 = ((1 - (absoluto(angleTwoVectors(inter->normal, ray.vector)))) * 255);

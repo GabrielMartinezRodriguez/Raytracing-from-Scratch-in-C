@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2019/11/09 13:53:10 by gmartine          #+#    #+#             */
-/*   Updated: 2019/11/16 18:22:08 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/02/18 22:41:28 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -61,7 +61,7 @@ char			**ft_split(char const *s, char c)
 			ini = i - 1;
 			seeking = 0;
 		}
-		else if (seeking == 0 && (s[i - 1] == c || s[i] == '\0'))
+		if (seeking == 0 && (s[i - 1] == c || s[i] == '\0'))
 		{
 			seeking = 1;
 			ptr = ft_strndup(&s[ini], i - ini - 1, c);

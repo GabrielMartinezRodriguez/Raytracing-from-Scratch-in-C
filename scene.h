@@ -12,9 +12,9 @@ typedef struct s_tupla
 
 typedef struct s_color
 {
-        char    red;
-        char    green;
-        char    blue;
+        unsigned char    red;
+        unsigned char    green;
+        unsigned char    blue;
 }              t_color;
 
 typedef struct s_vect3

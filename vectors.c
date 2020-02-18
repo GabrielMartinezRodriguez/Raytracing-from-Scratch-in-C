@@ -32,6 +32,14 @@ t_vect3 changeLenght(t_vect3 vector, double module)
     return(vector);
 }
 
+t_vect3 mulVector(t_vect3 vector, double number)
+{
+    vector.x *= number;
+    vector.y *= number;
+    vector.z *= number;
+    return (vector);
+}
+
 t_vect3 perpendicular_rand_vect(t_vect3 vector)
 {
     t_tupla equation;

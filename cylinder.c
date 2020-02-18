@@ -28,7 +28,7 @@ static void ini_tops(t_cylinder *cyl)
 {
     cyl->upper_top.center = pointVectorPoint(cyl->point, cyl->normal, cyl->height/2);
     cyl->lower_top.center = pointVectorPoint(cyl->point, cyl->normal, -cyl->height/2);
-    cyl->lower_top.normal = cyl->normal;
+    cyl->lower_top.normal = mulVector(cyl->normal, -1);
     cyl->upper_top.normal = cyl->normal;
     cyl->upper_top.radius = cyl->diameter/2;
     cyl->lower_top.radius = cyl->diameter/2;
@@ -55,6 +55,17 @@ t_intersection *cylinderCollision(t_rayo ray, t_cylinder *cyl)
     return(returned);
 }
 
+t_vect3 calcNormalCyl(t_cylinder cyl, t_intersection *intersection, t_vect3 intersectionPoint,t_matrix3 matrix)
+{
+    t_vect3 inPoint;
+    t_vect3 normal;
+
+    inPoint = cyl.point;
+    inPoint.x = intersectionPoint.x;
+    normal = distanceVector(intersectionPoint, inPoint);
+    normal = rotateVector(matrix, normal);
+    return (normal);
+}
 t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matrix3 matrix)
 {
     t_tupla productos[3];
@@ -77,8 +88,6 @@ t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matri
     intersection = ft_calloc(1, sizeof(t_intersection));
     intersection->lambda = menor;
     intersection->type = cylinder;
-    intersection->normal = point;
-    intersection->normal.x = 0;
-    intersection->normal = rotateVector(matrix, intersection->normal);
+    intersection->normal = calcNormalCyl(cyl, intersection, point, matrix);
     return (intersection);
 }
