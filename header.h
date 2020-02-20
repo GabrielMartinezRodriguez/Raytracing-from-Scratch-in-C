@@ -11,6 +11,24 @@
 #include "get_next_line/get_next_line.h"
 #include "scene.h"
 
+
+typedef struct s_arg
+{
+    char *file_save;
+    char *file_load;
+}              t_arg;
+
+typedef struct s_libx
+{
+    void *ptr;
+    void *win_ptr;
+    void *img_ptr;
+    void *img_addr;
+}              t_libx;
+
+t_rayo cordToRay(int i, int j, t_scene *scene);
+t_rayo reflexToLight(t_intersection *intersection, t_rayo primary, t_light_point light);
+void error(char *s);
 int loadScene(t_scene *scene, char *fileName);
 t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera);
 t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matrix3 matrix);
@@ -61,5 +79,6 @@ t_vect3 pointRay(t_rayo ray, double lamda);
 double lowerNumber(t_tupla tupla);
 t_vect3 newVector(double x, double y, double z);
 t_vect3 addVector(t_vect3 vect1, t_vect3 vect2);
+t_vect3 mulVector(t_vect3 vector, double number);
 double angleTwoVectors(t_vect3 vect1, t_vect3 vect2);
 #endif

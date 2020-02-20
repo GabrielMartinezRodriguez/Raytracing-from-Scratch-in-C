@@ -83,6 +83,7 @@ typedef struct  s_square
         t_vect3 vect1;
         t_vect3 vect2;
         t_color color;
+        void    *funCollider;
 }               t_square;
 
 typedef struct  s_triangle
@@ -110,6 +111,7 @@ typedef enum e_object
 typedef struct s_list_obj
 {
         void            *object;
+        void            *functionColl;
         t_object        type;
         struct s_list_obj      *next;
 }               t_list_obj;
@@ -141,7 +143,11 @@ typedef struct s_camera
 {
         t_vect3 origin;
         t_vect3 direction;
+        t_vect3 vectorX;
+        t_vect3 vectorY;
+        double  depth;
         double  FOV_H;
+        double  FOV_H_RAD;
 }               t_camera;
 
 typedef struct s_resolution

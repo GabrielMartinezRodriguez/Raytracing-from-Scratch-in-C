@@ -43,7 +43,7 @@ int main()
     ray.vector.x = 960;
     ray.vector.y = -540;
     ray.vector.z = 960;
-    sphere.punto.x = 0;
+    sphere.punto.x = 40;
     sphere.punto.y = 0;
     sphere.punto.z = 30;
     sphere.radio = 10;
@@ -79,7 +79,7 @@ int main()
 
     pl.point.x = 0;
     pl.point.y = 0;
-    pl.point.z = 30;
+    pl.point.z = 500;
     pl.normal.x = 0;
     pl.normal.z = -1;
     pl.normal.y = 0;
@@ -105,7 +105,7 @@ int main()
             ray.punto.x = 0;
             ray.punto.y = 0;
             ray.punto.z = 0;
-            inter1 = cylinderCollision(ray, &cyl);
+            inter1 = sphereCollision(ray, &sphere);
             inter2 = planeCollision(ray, &pl);
             inter = returnNear(inter1, inter2);
 
@@ -117,7 +117,7 @@ int main()
                 shader2 = NULL;
                 ray.punto = addVector(pointRay(ray, inter->lambda), changeLenght(inter->normal, 0.001));
                 ray.vector = distanceVector(scene.lights->point.point, ray.punto);
-                shader1 = cylinderCollision(ray, &cyl);
+                shader1 = sphereCollision(ray, &sphere);
                 shader2 = planeCollision(ray, &pl);
                 shader = returnNear(shader1, shader2);
                 if(inter1 == inter && shader != NULL)

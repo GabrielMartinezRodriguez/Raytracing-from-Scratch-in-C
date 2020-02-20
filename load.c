@@ -268,8 +268,10 @@ int loadScene(t_scene *scene, char *fileName)
         if(get_next_line(fd, &line) == 0)
             end = 1;
         words = ft_split(line, ' ');
-        processString(scene, words);
+        if (countWords(words) > 0)
+            processString(scene, words);
         freeSpace(words);
         free(line);
     }
+    close(fd);
 }
