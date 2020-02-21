@@ -34,7 +34,7 @@ t_intersection  *planeCollision(t_rayo ray, t_plane *pl)
 		return (NULL);
 	returned = ft_calloc(1, sizeof(t_intersection));
 	returned->object = pl;
-	returned->type = plane;
+	returned->color = pl->color;
 	returned->lambda = lowerNumber(equation);
 	returned->normal = pl->normal;
 	return (returned);

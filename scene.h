@@ -12,6 +12,7 @@ typedef struct s_tupla
 
 typedef struct s_color
 {
+        unsigned char    intensity;
         unsigned char    red;
         unsigned char    green;
         unsigned char    blue;
@@ -58,6 +59,7 @@ typedef struct s_circle
 {
         t_vect3 center;
         t_vect3 normal;
+        t_color color;
         double radius;
 }              t_circle;
 
@@ -91,7 +93,7 @@ typedef struct  s_triangle
         t_vect3 point1;
         t_vect3 point2;
         t_vect3 point3;
-        t_color s_color;
+        t_color color;
         t_vect3 vect1;
         t_vect3 vect2;
         t_vect3 normal;
@@ -172,7 +174,7 @@ typedef struct   s_intersection
     double      lambda;
     void        *object;
     t_vect3     normal;
-    t_object    type;
+    t_color     color;
 }               t_intersection;
 
 #endif

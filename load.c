@@ -133,7 +133,10 @@ void loadLight(t_scene *scene, char **words)
     if(countWords(words) != 4)
         error("Mal formato de luz");
     if(light_list == NULL)
+    {
         light_list = ft_calloc(1, sizeof(t_list_light));
+        scene->lights = light_list;
+    }
     else
     {
         light_list->next = ft_calloc(1, sizeof(t_list_light));
@@ -158,6 +161,7 @@ void loadSphere(t_scene *scene, char **words)
     sp->radio = ft_atoi_double(words[2]) / 2;
     sp->color = chargeColor(words[3]);
     lista->object = sp;
+    lista->functionColl = &sphereCollision;
     addObject(scene, lista);
 }
 void loadPlane(t_scene *scene, char **words)
@@ -174,6 +178,7 @@ void loadPlane(t_scene *scene, char **words)
     pl->normal = chargeNormalizedVector(words[2]);
     pl->color = chargeColor(words[3]);
     lista->object = pl;
+    lista->functionColl = &planeCollision;
     addObject(scene, lista);
 }
 void loadSquare(t_scene *scene, char **words)
@@ -191,6 +196,7 @@ void loadSquare(t_scene *scene, char **words)
     sq->height = ft_atoi_double(words[3]);
     sq->color = chargeColor(words[4]);
     lista->object = sq;
+    lista->functionColl = &squareCollision;
     addObject(scene, lista);
 }
 void loadCylinder(t_scene *scene, char **words)
@@ -209,6 +215,7 @@ void loadCylinder(t_scene *scene, char **words)
     cyl->height = ft_atoi_double(words[4]);
     cyl->color = chargeColor(words[5]);
     lista->object = cyl;
+    lista->functionColl = &cylinderCollision;
     addObject(scene, lista);
 }
 void loadTriangle(t_scene *scene, char **words)
@@ -224,8 +231,9 @@ void loadTriangle(t_scene *scene, char **words)
     tri->point1 = chargePoint(words[1]);
     tri->point2 = chargePoint(words[2]);
     tri->point3 = chargePoint(words[3]);
-    tri->s_color = chargeColor(words[4]);
+    tri->color = chargeColor(words[4]);
     lista->object = tri;
+    lista->functionColl = &triangleCollision;
     addObject(scene, lista);
 }
 static void processString(t_scene *scene, char **words)
@@ -273,5 +281,6 @@ int loadScene(t_scene *scene, char *fileName)
         freeSpace(words);
         free(line);
     }
+    iniCamera(&scene->camera, scene->resolution);
     close(fd);
 }

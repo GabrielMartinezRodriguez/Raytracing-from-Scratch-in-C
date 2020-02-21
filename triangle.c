@@ -27,7 +27,7 @@ t_intersection *triangleCollision(t_rayo ray, t_triangle *tri)
         return (NULL);
     returned = ft_calloc(1, sizeof(t_intersection));
     returned->lambda = lambda;
-    returned->type = triangle;
+    returned->color = tri->color;
     returned->object  = tri;
     returned->normal = tri->normal;
     return(returned);

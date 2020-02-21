@@ -18,7 +18,7 @@ t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera)
         return (NULL);
     returned = ft_calloc(1, sizeof(t_intersection));
     returned->object = esfera;
-    returned->type = sphere;
+    returned->color = esfera->color;
     returned->lambda = lowerNumber(equation);
     returned->normal = distanceVector(pointRay(rayo, returned->lambda), esfera->punto);
     return (returned);

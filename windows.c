@@ -1,16 +1,11 @@
-#include "header.h"
+/*#include "header.h"
 
 double FOV_H_GR = 120;
 double FOV_V_RAD;
 int RES_H = 1920;
 int RES_V = 1080;
 
-double absoluto(double abs)
-{
-    if(abs < 0)
-        return -abs;
-    return abs;
-}
+
 
 int main()
 {
@@ -148,3 +143,4 @@ int main()
     return 0;
 }
 
+*/

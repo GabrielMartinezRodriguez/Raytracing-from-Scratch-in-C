@@ -23,11 +23,18 @@ typedef struct s_libx
     void *ptr;
     void *win_ptr;
     void *img_ptr;
-    void *img_addr;
+    int *img_addr;
 }              t_libx;
 
+void iniCamera(t_camera *camera, t_resolution resolution);
+t_color angleColor(t_color color, t_vect3 normal, t_vect3 rayDir);
+t_color reflectedColor(t_color colorObject, t_color colorLight);
+t_color intensityColor(t_color color, double intensity);
+t_color addColor(t_color color1, t_color color2);
+unsigned int colorToint(t_color color);
+double absoluto(double abs);
 t_rayo cordToRay(int i, int j, t_scene *scene);
-t_rayo reflexToLight(t_intersection *intersection, t_rayo primary, t_light_point light);
+t_rayo rayToLight(t_intersection *intersection, t_rayo primary, t_light_point light);
 void error(char *s);
 int loadScene(t_scene *scene, char *fileName);
 t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera);

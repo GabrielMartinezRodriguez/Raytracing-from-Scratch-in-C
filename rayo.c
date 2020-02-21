@@ -8,15 +8,15 @@ t_rayo cordToRay(int i, int j, t_scene *scene)
     t_vect3 vectZ;
     
     ray.punto = scene->camera.origin;
-    vectX =  mulVector(scene->camera.direction, scene->camera.depth);
-    vectY = mulVector(scene->camera.vectorX, i - scene->resolution.x/2);
-    vectZ = mulVector(scene->camera.vectorY, scene->resolution.y/2 - j);
+    vectZ =  mulVector(scene->camera.direction, scene->camera.depth);
+    vectX = mulVector(scene->camera.vectorX, i - scene->resolution.x/2);
+    vectY = mulVector(scene->camera.vectorY, scene->resolution.y/2 - j);
     ray.vector = addVector(vectX, vectY);
     ray.vector = addVector(ray.vector, vectZ);
     return (ray);
 }
 
-t_rayo reflexToLight(t_intersection *intersection, t_rayo primary, t_light_point light)
+t_rayo rayToLight(t_intersection *intersection, t_rayo primary, t_light_point light)
 {
     t_rayo secondary;
     t_vect3 originPoint;

@@ -32,6 +32,8 @@ static void ini_tops(t_cylinder *cyl)
     cyl->upper_top.normal = cyl->normal;
     cyl->upper_top.radius = cyl->diameter/2;
     cyl->lower_top.radius = cyl->diameter/2;
+    cyl->lower_top.color = cyl->color;
+    cyl->upper_top.color = cyl->color;
 }
 t_intersection *cylinderCollision(t_rayo ray, t_cylinder *cyl)
 {
@@ -51,7 +53,7 @@ t_intersection *cylinderCollision(t_rayo ray, t_cylinder *cyl)
     if(returned == NULL)
         return (NULL);
     returned->object = cyl;
-    returned->type = cylinder;
+    returned->color = cyl->color;
     return(returned);
 }
 
@@ -87,7 +89,7 @@ t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matri
         return (NULL);
     intersection = ft_calloc(1, sizeof(t_intersection));
     intersection->lambda = menor;
-    intersection->type = cylinder;
+    intersection->color = cyl.color;
     intersection->normal = calcNormalCyl(cyl, intersection, point, matrix);
     return (intersection);
 }

@@ -19,14 +19,26 @@ t_intersection *returnNear(t_intersection *first, t_intersection *second)
     if(first->lambda > 0 && second ->lambda > 0)
     {
         if(first->lambda > second->lambda)
+        {
+            free(first);
             return(second);
+        }
         else
+        {
+            free(second);
             return(first);
+        }
     }
     else if(first->lambda > 0)
+    {
+        free(second);
         return (first);
+    }
     else if(second->lambda > 0)
+    {
+        free(first);
         return (second);
+    }
     else
         return (NULL);
 }

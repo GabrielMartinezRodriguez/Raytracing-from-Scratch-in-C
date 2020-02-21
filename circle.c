@@ -19,7 +19,7 @@ t_intersection *circleCollision(t_rayo ray, t_circle *cir)
     returned = ft_calloc(1, sizeof(t_intersection));
     returned->lambda = lambda;
     returned->object = cir;
-    returned->type = circle;
+    returned->color = cir->color;
     returned->normal = cir->normal;
     return (returned);
 }

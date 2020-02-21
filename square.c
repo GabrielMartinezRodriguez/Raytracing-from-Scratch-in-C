@@ -35,7 +35,7 @@ t_intersection *squareCollision(t_rayo ray, t_square *sq)
         return (NULL);
     returned = ft_calloc(1, sizeof(t_intersection));
     returned->lambda = lambda;
-    returned->type = square;
+    returned->color = sq->color;
     returned->object = sq;
     returned->normal = sq->normal;
     return (returned);

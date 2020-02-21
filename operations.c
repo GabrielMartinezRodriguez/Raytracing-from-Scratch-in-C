@@ -69,3 +69,10 @@ double lowerNumber(t_tupla tupla)
     }
     return (lower);
 }
+
+double absoluto(double abs)
+{
+    if(abs < 0)
+        return -abs;
+    return abs;
+}
