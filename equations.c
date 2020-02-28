@@ -4,6 +4,7 @@ t_tupla solveEquation(t_tupla equation, double equal)
 {
     t_tupla solution;
 
+    ft_bzero(&solution, sizeof(t_tupla));
     if (equation.tamaño == 3)
         solution = solveEquation2(equation, equal);
     else if(equation.tamaño == 2)

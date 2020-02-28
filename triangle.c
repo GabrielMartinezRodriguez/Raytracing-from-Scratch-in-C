@@ -12,7 +12,6 @@ t_intersection *triangleCollision(t_rayo ray, t_triangle *tri)
     double lambda;
     t_intersection *returned;
     t_tupla solution;
-    t_tupla equation[4];
     t_vect3 pointInter;
 
     iniTriangle(tri);

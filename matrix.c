@@ -71,7 +71,6 @@ double subMatrixDet(t_matrix3 matrix, int i, int j)
 {
     int iniFila;
     int iniCol;
-    int aux;
     double det;
     double **newMatrix;
 

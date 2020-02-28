@@ -18,7 +18,6 @@ t_square *iniSquare(t_square *square)
 t_intersection *squareCollision(t_rayo ray, t_square *sq)
 {
     t_intersection  *returned;
-    t_tupla         equation[4];
     t_tupla         solution;
     t_vect3         puntoInter;
     double          lambda;

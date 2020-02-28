@@ -11,7 +11,6 @@
 #include "get_next_line/get_next_line.h"
 #include "scene.h"
 
-
 typedef struct s_arg
 {
     char *file_save;
@@ -26,6 +25,7 @@ typedef struct s_libx
     int *img_addr;
 }              t_libx;
 
+t_cylinder *iniCylinder(t_cylinder *cyl);
 void iniCamera(t_camera *camera, t_resolution resolution);
 t_color angleColor(t_color color, t_vect3 normal, t_vect3 rayDir);
 t_color reflectedColor(t_color colorObject, t_color colorLight);
@@ -38,7 +38,7 @@ t_rayo rayToLight(t_intersection *intersection, t_rayo primary, t_light_point li
 void error(char *s);
 int loadScene(t_scene *scene, char *fileName);
 t_intersection  *sphereCollision(t_rayo rayo, t_esfera *esfera);
-t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl, t_matrix3 matrix);
+t_intersection *cylinderCollisionTransformed(t_rayo ray, t_cylinder cyl);
 t_intersection *squareCollision(t_rayo ray, t_square *sq);
 t_tupla notableProduct(double first, double second);
 t_tupla addTupla(t_tupla first, t_tupla second);

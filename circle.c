@@ -10,8 +10,6 @@ t_intersection *circleCollision(t_rayo ray, t_circle *cir)
     lambda = pseudoIntersection(ray, cir->center, cir->normal);
     if(lambda < 0)
         return (NULL);
-    else
-        lambda = lambda;
     intersection_point = pointRay(ray, lambda);
     distance = distancePoint(cir->center, intersection_point);
     if(distance > cir->radius)

@@ -74,6 +74,8 @@ typedef struct s_cylinder
         t_vect3 vect2;
         t_circle upper_top;
         t_circle lower_top;
+        t_matrix3 inverseBase;
+        t_matrix3 base;
 }               t_cylinder;
 
 typedef struct  s_square

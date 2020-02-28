@@ -4,6 +4,7 @@ t_arg process_args(int arg_n, char **arg_s)
 {
     t_arg arg;
 
+    ft_bzero(&arg, sizeof(t_arg));
     if(arg_n >= 2)
     {
         if(ft_strncmp(&arg_s[1][ft_strlen(arg_s[1]) - 3], ".rt", 3) == 0)
@@ -17,7 +18,7 @@ t_arg process_args(int arg_n, char **arg_s)
                     arg.file_save = ft_strdup("scene.bmp");
                 else
                     arg.file_save = ft_strjoin(arg_s[3], ".bmp");
-                if(arg_s > 4)
+                if(arg_n > 4)
                     error("Ha excedido la cantidad maxima de argumentos");
             }
         }
@@ -37,6 +38,7 @@ t_color calcColor(t_intersection *intersection, t_rayo ray, double intesity, t_c
     color = reflectedColor(intersection->color, colorLight);
     color = angleColor(color, intersection->normal, ray.vector);
     color = intensityColor(color, intesity);
+    return (color);
 }
 t_intersection *rayCollision(t_list_obj *objects, t_rayo ray)
 {
@@ -68,7 +70,6 @@ t_intersection *primaryCollision(t_scene *scene, t_rayo *ray,int pixelX, int pix
 t_color     secondaryCollision(t_scene *scene, t_rayo ray, t_intersection *intersectionObject)
 {
     t_list_light *light;
-    t_light_environmental env_light;
     t_intersection  *lightObstacle;
     double          distance[2];
     t_color         color;
@@ -95,7 +96,7 @@ void writePixelImage(t_libx *libx, t_color color, int x, int y)
     int size_line;
     int endian;
 
-    libx->img_addr = mlx_get_data_addr(libx->img_ptr, &bitPixel, &size_line, &endian);
+    libx->img_addr = (int *)mlx_get_data_addr(libx->img_ptr, &bitPixel, &size_line, &endian);
     libx->img_addr[(size_line/4) * y + x] = colorToint(color);
 }
 void theFinalFunction(t_libx *libx)

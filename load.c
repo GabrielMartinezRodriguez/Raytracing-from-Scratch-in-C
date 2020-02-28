@@ -66,25 +66,24 @@ t_color chargeColor(char *rgb)
     returned.green = ft_atoi(words[1]);
     returned.blue = ft_atoi(words[2]);
     freeSpace(words);
-    if(returned.red >= 0 && returned.red <= 255 && returned.green >= 0 && returned.green <= 255 && returned.blue >= 0 && returned.blue <= 255)
-        return(returned);
-    else
+    if(!(returned.red >= 0 && returned.red <= 255 && returned.green >= 0 && returned.green <= 255 && returned.blue >= 0 && returned.blue <= 255))
         error("Los componentes de un color codificado en RGB deben estar en el rango [0,255]");
+    return (returned);
 }
 t_vect3 chargeNormalizedVector(char *vector)
 {
     t_vect3 vector1;
     char **numbers;
+
     numbers = ft_split(vector, ',');
     if(countWords(numbers) != 3)
         error("Mal formato de vector");
     vector1.x = ft_atoi_double(numbers[0]);
     vector1.y = ft_atoi_double(numbers[1]);
     vector1.z = ft_atoi_double(numbers[2]);
-    if(vector1.x >= -1 && vector1.x <= 1 && vector1.y >= -1 && vector1.y <= 1 && vector1.z >= -1 && vector1.z <= 1)
-        return (vector1);
-    else
-        error("Los componentes de un vector de direccion deben estar en el rango [-1,1]");
+    if(!(vector1.x >= -1 && vector1.x <= 1 && vector1.y >= -1 && vector1.y <= 1 && vector1.z >= -1 && vector1.z <= 1))
+        error("Los componentes de un vector de direccion deben estar en el rango [-1,1]"); 
+    return (vector1);
 }
 void loadAmbientLight(t_scene *scene, char **words)
 {
@@ -211,11 +210,12 @@ void loadCylinder(t_scene *scene, char **words)
     cyl = ft_calloc(1, sizeof(t_cylinder));
     cyl->point = chargePoint(words[1]);
     cyl->normal = chargeNormalizedVector(words[2]);
-    cyl->diameter = ft_atoi_double(words[3]);
-    cyl->height = ft_atoi_double(words[4]);
-    cyl->color = chargeColor(words[5]);
+    cyl->color = chargeColor(words[3]);
+    cyl->diameter = ft_atoi_double(words[4]);
+    cyl->height = ft_atoi_double(words[5]);
     lista->object = cyl;
     lista->functionColl = &cylinderCollision;
+    iniCylinder(cyl);
     addObject(scene, lista);
 }
 void loadTriangle(t_scene *scene, char **words)
@@ -261,7 +261,6 @@ static void processString(t_scene *scene, char **words)
 }
 int loadScene(t_scene *scene, char *fileName)
 {
-    int i;
     char *line;
     char **words;
     int fd;
@@ -283,4 +282,5 @@ int loadScene(t_scene *scene, char *fileName)
     }
     iniCamera(&scene->camera, scene->resolution);
     close(fd);
+    return (0);
 }

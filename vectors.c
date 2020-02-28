@@ -176,9 +176,7 @@ double angleTwoVectors(t_vect3 vect1, t_vect3 vect2)
     double scalarProduct;
     double cos;
 
-    scalarProduct += vect1.x * vect2.x + vect1.y * vect2.y + vect1.z * vect2.z;
+    scalarProduct = vect1.x * vect2.x + vect1.y * vect2.y + vect1.z * vect2.z;
     cos = scalarProduct / (moduleVector(vect1) * moduleVector(vect2));
-    if(cos < -1 || cos > 1)
-        cos = cos;
     return (cos);
 }
