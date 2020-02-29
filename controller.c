@@ -90,6 +90,24 @@ t_color     secondaryCollision(t_scene *scene, t_rayo ray, t_intersection *inter
     }
     return (color);
 }
+t_color     ambientLight(t_scene *scene, t_intersection *intersection)
+{
+    t_color new_color;
+
+    ft_bzero(&new_color, sizeof(new_color));
+    new_color = reflectedColor(intersection->color, scene->env_light.color);
+    new_color = intensityColor(new_color, scene->env_light.intensity);
+    return (new_color);
+}
+
+t_color fusion_colors(t_colors_reflected colors)
+{
+    t_color color;
+
+    color = addColor(colors.color_ambient, colors.color_lights);
+    return (color);
+}
+
 void writePixelImage(t_libx *libx, t_color color, int x, int y)
 {
     int bitPixel;
@@ -104,17 +122,18 @@ void theFinalFunction(t_libx *libx)
     mlx_put_image_to_window(libx->ptr, libx->win_ptr, libx->img_ptr, 0, 0);
 }
 
-void generateImage(t_arg arg, t_scene scene, t_libx *libx)
+void generateImage(t_scene scene, t_libx *libx)
 {
     int i;
     int j;
     t_intersection *intersection;
-    t_color         color;
+    t_colors_reflected       colors;
     t_rayo           ray;
 
     libx->ptr = mlx_init();
     libx->win_ptr = mlx_new_window(libx->ptr, scene.resolution.x, scene.resolution.y, "RAYTRACING MAJESTUOSO");
     libx->img_ptr = mlx_new_image(libx->ptr, scene.resolution.x, scene.resolution.y);
+    ft_bzero(&colors, sizeof(t_colors_reflected));
     i = 0;
     j = 0;
     while(i < scene.resolution.y)
@@ -124,8 +143,9 @@ void generateImage(t_arg arg, t_scene scene, t_libx *libx)
             intersection = primaryCollision(&scene, &ray, j, i);
             if(intersection != NULL)
             {
-                color = secondaryCollision(&scene, ray, intersection);
-                writePixelImage(libx, color, j, i);
+                colors.color_lights = secondaryCollision(&scene, ray, intersection);
+                colors.color_ambient = ambientLight(&scene, intersection);
+                writePixelImage(libx, fusion_colors(colors), j, i);
             }
             if(intersection != NULL)
                 free(intersection);
@@ -135,17 +155,49 @@ void generateImage(t_arg arg, t_scene scene, t_libx *libx)
         j = 0;
     }
 }
-
+ int size_line;
+int                 mouse_hook(int button, int x, int y, t_libx *param)
+{
+    printf("button pulsado %d\n", button);
+    printf("pixel selecionado =  %d x %d\n", x, y);
+    printf("direcion a win ptr %p\n", param->win_ptr);
+    printf("%d", size_line/4);
+    return 0;
+}
 int main(int arg_n, char **arg_s)
 {
     t_scene scene;
     t_arg args;
     t_libx libx;
 
+    int bitPixel;
+   
+    int endian;
+
+    
+int fd;
+    unsigned char header[54] = {0x42, 0X4D, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+    0x36, 0x0, 0x0, 0x0, 0x28, 0x0, 0x0, 0x0, 0x80, 0x7 ,0x0,0x0, 0x38, 0x4, 0x0, 0x0, 0x01, 0x0, 0x20, 0x00,
+    0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    fd = open("patata.bmp", O_WRONLY|O_CREAT|O_TRUNC,0777);  
+    write(fd, header, 54);
     args = process_args(arg_n, arg_s);
     loadScene(&scene, args.file_load);
-    generateImage(args, scene, &libx);
+    generateImage(scene, &libx);
     theFinalFunction(&libx);
+    libx.img_addr = (int *)mlx_get_data_addr(libx.img_ptr, &bitPixel, &size_line, &endian);
+    printf("%d", size_line/4);
+    for(int x = 0; x < 1920; x++)
+    {
+        for(int y = 0; y < 1080; y++)
+        {
+            write(fd, &libx.img_addr[(size_line/4) * y + x], 4);
+            
+        }
+    }
+    close(fd);
+    mlx_mouse_hook(libx.win_ptr, &mouse_hook, &libx);
     mlx_loop(libx.ptr);
     return (0);
 }

@@ -18,6 +18,12 @@ typedef struct s_color
         unsigned char    blue;
 }              t_color;
 
+typedef struct s_colors_reflected
+{
+    t_color     color_lights;
+    t_color     color_ambient;
+}              t_colors_reflected;
+
 typedef struct s_vect3
 {
         double x;
