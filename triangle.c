@@ -28,6 +28,6 @@ t_intersection *triangleCollision(t_rayo ray, t_triangle *tri)
     returned->lambda = lambda;
     returned->color = tri->color;
     returned->object  = tri;
-    returned->normal = tri->normal;
+    returned->normal = mulVector(tri->normal, 1);
     return(returned);
 }

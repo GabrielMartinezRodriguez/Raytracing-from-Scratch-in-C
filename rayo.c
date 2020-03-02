@@ -6,7 +6,7 @@ t_rayo cordToRay(int i, int j, t_scene *scene)
     t_vect3 vectX;
     t_vect3 vectY;
     t_vect3 vectZ;
-    
+
     ray.punto = scene->camera.origin;
     vectZ =  mulVector(scene->camera.direction, scene->camera.depth);
     vectX = mulVector(scene->camera.vectorX, i - scene->resolution.x/2);

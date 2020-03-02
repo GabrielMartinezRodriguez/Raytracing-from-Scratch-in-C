@@ -11,6 +11,7 @@
 #include "libft/libft.h"
 #include "get_next_line/get_next_line.h"
 #include "scene.h"
+#define ESC 27
 
 typedef struct s_arg
 {
@@ -25,7 +26,9 @@ typedef struct s_libx
     void *img_ptr;
     int *img_addr;
 }              t_libx;
-
+void imageToFile(char *rgbMatrix, char *name, t_resolution resolution);
+void writeBMP(int fd, char *image, t_bmp_file file);
+t_bmp_file iniBMP(char *name, unsigned short int bitPerPixel, t_resolution resolution);
 t_cylinder *iniCylinder(t_cylinder *cyl);
 void iniCamera(t_camera *camera, t_resolution resolution);
 t_color angleColor(t_color color, t_vect3 normal, t_vect3 rayDir);

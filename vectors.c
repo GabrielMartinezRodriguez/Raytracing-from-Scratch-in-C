@@ -143,7 +143,7 @@ t_tupla vectorialSpaceSolution(t_vect3 origin, t_vect3 vect1, t_vect3 vect2, t_v
 
     if(vect1.x != 0)
     {
-        equation[0] = newTupla((vect2.x / vect1.x), (point.x - origin.x) / vect1.x);
+        equation[0] = newTupla(-(vect2.x / vect1.x), (point.x - origin.x) / vect1.x);
         equation[1] = mulTupla(equation[0], vect1.y);
         equation[2] = newTupla(vect2.y, origin.y);
         equation[3] = addTupla(equation[1], equation[2]);
@@ -151,7 +151,7 @@ t_tupla vectorialSpaceSolution(t_vect3 origin, t_vect3 vect1, t_vect3 vect2, t_v
     }
     else if(vect1.y != 0)
     {
-        equation[0] = newTupla((vect2.y / vect1.y), (point.y - origin.y) / vect1.y);
+        equation[0] = newTupla(-(vect2.y / vect1.y), (point.y - origin.y) / vect1.y);
         equation[1] = mulTupla(equation[0], vect1.x);
         equation[2] = newTupla(vect2.x, origin.x);
         equation[3] = addTupla(equation[1], equation[2]);
@@ -159,7 +159,7 @@ t_tupla vectorialSpaceSolution(t_vect3 origin, t_vect3 vect1, t_vect3 vect2, t_v
     }
     else
     {
-        equation[0] = newTupla((vect2.z / vect1.z), (point.z - origin.z) / vect1.z);
+        equation[0] = newTupla(-(vect2.z / vect1.z), (point.z - origin.z) / vect1.z);
         equation[1] = mulTupla(equation[0], vect1.x);
         equation[2] = newTupla(vect2.x, origin.x);
         equation[3] = addTupla(equation[1], equation[2]);
@@ -168,7 +168,7 @@ t_tupla vectorialSpaceSolution(t_vect3 origin, t_vect3 vect1, t_vect3 vect2, t_v
     if(solution.tamaño <= 0)
         return (solution);
     solution.tamaño++;
-    solution.tupla[1] = solution.tupla[1] = equation[0].tupla[0] * solution.tupla[0] + equation[0].tupla[1];
+    solution.tupla[1] = equation[0].tupla[0] * solution.tupla[0] + equation[0].tupla[1];
     return (solution);
 }
 double angleTwoVectors(t_vect3 vect1, t_vect3 vect2)

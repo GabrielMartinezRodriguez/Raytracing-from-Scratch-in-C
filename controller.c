@@ -117,9 +117,14 @@ void writePixelImage(t_libx *libx, t_color color, int x, int y)
     libx->img_addr = (int *)mlx_get_data_addr(libx->img_ptr, &bitPixel, &size_line, &endian);
     libx->img_addr[(size_line/4) * y + x] = colorToint(color);
 }
-void theFinalFunction(t_libx *libx)
+
+void showScene(t_libx *libx, t_arg *args, t_scene *scene)
 {
-    mlx_put_image_to_window(libx->ptr, libx->win_ptr, libx->img_ptr, 0, 0);
+    if(args->file_save == NULL)
+        mlx_put_image_to_window(libx->ptr, libx->win_ptr, libx->img_ptr, 0, 0);
+    else
+        imageToFile((char *)libx->img_addr, args->file_save, scene->resolution);
+    mlx_destroy_image(libx->ptr, libx->img_ptr);
 }
 
 void generateImage(t_scene scene, t_libx *libx)
@@ -164,40 +169,24 @@ int                 mouse_hook(int button, int x, int y, t_libx *param)
     printf("%d", size_line/4);
     return 0;
 }
+
+int                esc_hook(int button)
+{
+    if(button == ESC)
+        exit(1);
+    return 0;
+}
+
 int main(int arg_n, char **arg_s)
 {
     t_scene scene;
     t_arg args;
     t_libx libx;
-
-    int bitPixel;
-   
-    int endian;
-
-    
-int fd;
-    unsigned char header[54] = {0x42, 0X4D, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-    0x36, 0x0, 0x0, 0x0, 0x28, 0x0, 0x0, 0x0, 0x80, 0x7 ,0x0,0x0, 0x38, 0x4, 0x0, 0x0, 0x01, 0x0, 0x20, 0x00,
-    0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    fd = open("patata.bmp", O_WRONLY|O_CREAT|O_TRUNC,0777);  
-    write(fd, header, 54);
     args = process_args(arg_n, arg_s);
     loadScene(&scene, args.file_load);
     generateImage(scene, &libx);
-    theFinalFunction(&libx);
-    libx.img_addr = (int *)mlx_get_data_addr(libx.img_ptr, &bitPixel, &size_line, &endian);
-    printf("%d", size_line/4);
-    for(int x = 0; x < 1920; x++)
-    {
-        for(int y = 0; y < 1080; y++)
-        {
-            write(fd, &libx.img_addr[(size_line/4) * y + x], 4);
-            
-        }
-    }
-    close(fd);
-    mlx_mouse_hook(libx.win_ptr, &mouse_hook, &libx);
+    showScene(&libx, &args, &scene);
+    mlx_key_hook(libx.win_ptr, &esc_hook, &libx);
     mlx_loop(libx.ptr);
     return (0);
 }

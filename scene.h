@@ -185,4 +185,23 @@ typedef struct   s_intersection
     t_color     color;
 }               t_intersection;
 
+typedef struct  s_bmp_file
+{
+        char *file_name;
+        char magicFile[2];
+        unsigned int fileSize;
+        unsigned short int reserved[2];
+        t_resolution resolution;
+        unsigned int header_size;
+        unsigned short int planesColor;
+        unsigned short int bitsPerPixel;
+        unsigned int comprension;
+        unsigned int imageSize;
+        unsigned int pixelsPerMeterX;
+        unsigned int pixelsPerMeterY;
+        unsigned int totalColors;
+        unsigned int importantColors;
+        unsigned int pixelData;
+}             t_bmp_file;
+
 #endif
