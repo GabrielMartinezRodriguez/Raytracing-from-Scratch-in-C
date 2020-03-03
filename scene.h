@@ -1,3 +1,15 @@
+/* ************************************************************************** */
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   scene.h                                            :+:      :+:    :+:   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2020/03/03 17:48:10 by gmartine          #+#    #+#             */
+/*   Updated: 2020/03/03 17:54:20 by gmartine         ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
 #ifndef SCENE_H
 # define SCENE_H
 
@@ -5,17 +17,17 @@
 
 typedef struct s_tupla
 {
-        int     tamaño;
-        double  tupla[3];
+	int     tamaño;
+	double  tupla[3];
 }              t_tupla;
 
 
 typedef struct s_color
 {
-        unsigned char    intensity;
-        unsigned char    red;
-        unsigned char    green;
-        unsigned char    blue;
+	unsigned char    intensity;
+	unsigned char    red;
+	unsigned char    green;
+	unsigned char    blue;
 }              t_color;
 
 typedef struct s_colors_reflected
@@ -26,104 +38,104 @@ typedef struct s_colors_reflected
 
 typedef struct s_vect3
 {
-        double x;
-        double y;
-        double z;
+	double x;
+	double y;
+	double z;
 }              t_vect3;
 
 typedef struct s_matrix3
 {
-        t_vect3 vect1;
-        t_vect3 vect2;
-        t_vect3 vect3;
+	t_vect3 vect1;
+	t_vect3 vect2;
+	t_vect3 vect3;
 }              t_matrix3;
 
 
 typedef struct s_rayo
 {
-        t_vect3 punto;
-        t_vect3 vector;
+	t_vect3 punto;
+	t_vect3 vector;
 }              t_rayo;
 
 /*OBJECTS*/                                             
 typedef struct s_esfera
 {
-        t_vect3 punto;
-        double  radio;
-        t_color color;
+	t_vect3 punto;
+	double  radio;
+	t_color color;
 }              t_esfera;
 
 typedef struct s_plane
 {
-        t_vect3 normal;
-        t_vect3 point;
-        t_color color;
-        double  hight;
+	t_vect3 normal;
+	t_vect3 point;
+	t_color color;
+	double  hight;
 }               t_plane;
 
 typedef struct s_circle
 {
-        t_vect3 center;
-        t_vect3 normal;
-        t_color color;
-        double radius;
+	t_vect3 center;
+	t_vect3 normal;
+	t_color color;
+	double radius;
 }              t_circle;
 
 typedef struct s_cylinder
 {
-        t_vect3 point;
-        t_vect3 normal;
-        double diameter;
-        double height;
-        t_color color;
-        t_vect3 vect1;
-        t_vect3 vect2;
-        t_circle upper_top;
-        t_circle lower_top;
-        t_matrix3 inverseBase;
-        t_matrix3 base;
+	t_vect3 point;
+	t_vect3 normal;
+	double diameter;
+	double height;
+	t_color color;
+	t_vect3 vect1;
+	t_vect3 vect2;
+	t_circle upper_top;
+	t_circle lower_top;
+	t_matrix3 inverseBase;
+	t_matrix3 base;
 }               t_cylinder;
 
 typedef struct  s_square
 {
-        t_vect3 point;
-        t_vect3 normal;
-        double  height;
-        t_vect3 corner;
-        t_vect3 vect1;
-        t_vect3 vect2;
-        t_color color;
-        void    *funCollider;
+	t_vect3 point;
+	t_vect3 normal;
+	double  height;
+	t_vect3 corner;
+	t_vect3 vect1;
+	t_vect3 vect2;
+	t_color color;
+	void    *funCollider;
 }               t_square;
 
 typedef struct  s_triangle
 {
-        t_vect3 point1;
-        t_vect3 point2;
-        t_vect3 point3;
-        t_color color;
-        t_vect3 vect1;
-        t_vect3 vect2;
-        t_vect3 normal;
+	t_vect3 point1;
+	t_vect3 point2;
+	t_vect3 point3;
+	t_color color;
+	t_vect3 vect1;
+	t_vect3 vect2;
+	t_vect3 normal;
 }               t_triangle;
 
 /*OBJECT LIST*/
 typedef enum e_object
 {
-        sphere,
-        square,
-        plane,
-        cylinder,
-        triangle,
-        circle
+	sphere,
+	square,
+	plane,
+	cylinder,
+	triangle,
+	circle
 }             t_object;
 
 typedef struct s_list_obj
 {
-        void            *object;
-        void            *functionColl;
-        t_object        type;
-        struct s_list_obj      *next;
+	void            *object;
+	void            *functionColl;
+	t_object        type;
+	struct s_list_obj      *next;
 }               t_list_obj;
 
 /*LIGHTS*/
@@ -151,28 +163,28 @@ typedef struct  s_list_light
 
 typedef struct s_camera
 {
-        t_vect3 origin;
-        t_vect3 direction;
-        t_vect3 vectorX;
-        t_vect3 vectorY;
-        double  depth;
-        double  FOV_H;
-        double  FOV_H_RAD;
+	t_vect3 origin;
+	t_vect3 direction;
+	t_vect3 vectorX;
+	t_vect3 vectorY;
+	double  depth;
+	double  FOV_H;
+	double  FOV_H_RAD;
 }               t_camera;
 
 typedef struct s_resolution
 {
-        int     x;
-        int     y;
+	int     x;
+	int     y;
 }              t_resolution;
 
 typedef struct s_scene
 {
-        t_list_obj      *objets;
-        t_list_light    *lights;
-        t_light_environmental env_light;
-        t_camera        camera;
-        t_resolution    resolution;
+	t_list_obj      *objets;
+	t_list_light    *lights;
+	t_light_environmental env_light;
+	t_camera        camera;
+	t_resolution    resolution;
 }               t_scene;
 
 /*INTERSECTION WITH OBJECT*/
@@ -187,21 +199,21 @@ typedef struct   s_intersection
 
 typedef struct  s_bmp_file
 {
-        char *file_name;
-        char magicFile[2];
-        unsigned int fileSize;
-        unsigned short int reserved[2];
-        t_resolution resolution;
-        unsigned int header_size;
-        unsigned short int planesColor;
-        unsigned short int bitsPerPixel;
-        unsigned int comprension;
-        unsigned int imageSize;
-        unsigned int pixelsPerMeterX;
-        unsigned int pixelsPerMeterY;
-        unsigned int totalColors;
-        unsigned int importantColors;
-        unsigned int pixelData;
+	char *file_name;
+	char magicFile[2];
+	unsigned int fileSize;
+	unsigned short int reserved[2];
+	t_resolution resolution;
+	unsigned int header_size;
+	unsigned short int planesColor;
+	unsigned short int bitsPerPixel;
+	unsigned int comprension;
+	unsigned int imageSize;
+	unsigned int pixelsPerMeterX;
+	unsigned int pixelsPerMeterY;
+	unsigned int totalColors;
+	unsigned int importantColors;
+	unsigned int pixelData;
 }             t_bmp_file;
 
 #endif
