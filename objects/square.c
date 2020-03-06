@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:48:19 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/04 21:36:44 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:19:29 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -27,7 +27,7 @@ t_square			*inisquare(t_square *square)
 	return (square);
 }
 
-t_vect3				trisquare(t_triangle *sq, t_rayo ray)
+t_vect3				squarenormal(t_square *sq, t_rayo ray)
 {
 	if (angletwovectors(sq->normal, ray.vector) > 0)
 		return (mulvector(sq->normal, -1));
@@ -56,6 +56,6 @@ t_intersection		*squarecollision(t_rayo ray, t_square *sq)
 	returned->lambda = lambda;
 	returned->color = sq->color;
 	returned->object = sq;
-	returned->normal = sq->normal;
+	returned->normal = squarenormal(sq, ray);
 	return (returned);
 }

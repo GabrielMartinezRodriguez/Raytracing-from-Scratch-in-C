@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 21:58:14 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 21:11:18 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 17:05:18 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -219,4 +219,12 @@ typedef struct			s_bmp_file
 	unsigned int			importantcolors;
 	unsigned int			pixeldata;
 }						t_bmp_file;
+
+typedef struct			s_data_struct
+{
+	t_scene			scene;
+	t_libx			libx;
+	t_arg			args;
+}						t_data_struct;
+
 #endif

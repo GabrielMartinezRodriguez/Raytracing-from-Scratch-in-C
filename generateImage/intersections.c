@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:47:29 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 16:33:49 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:34:49 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -18,7 +18,6 @@ t_intersection		*returnnear(t_intersection *first, t_intersection *second)
 
 	first = infront(first);
 	second = infront(second);
-
 	if (first != NULL && second != NULL)
 	{
 		if (first->lambda > second->lambda)

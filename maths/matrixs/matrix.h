@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 20:44:14 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 16:14:17 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:28:11 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -24,5 +24,5 @@ void			set_index_matrix(t_matrix3 *matrix, int i, int j, double value);
 double			get_index_matrix(t_matrix3 matrix, int i, int j);
 t_matrix3		transposematrix(t_matrix3 matrix);
 t_matrix3		inimatrix(t_vect3 first, t_vect3 second, t_vect3 third);
-void            freematrix(double **matrix);
+void			freematrix(double **matrix);
 #endif

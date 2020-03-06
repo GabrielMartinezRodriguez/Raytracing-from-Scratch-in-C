@@ -6,12 +6,13 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/05 20:51:55 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 21:05:47 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:31:35 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
-# ifndef LIBX_H
+#ifndef LIBX_H
 # define LIBX_H
 # include "../header.h"
-    void ini_libx(t_libx *libx, t_scene *scene);
+
+void ini_libx(t_data_struct *data);
 #endif

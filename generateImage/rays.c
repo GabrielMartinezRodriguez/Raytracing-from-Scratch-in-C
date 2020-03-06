@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:47:59 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 20:08:23 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:34:38 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -33,7 +33,7 @@ t_rayo			raytolight(t_intersection *intersection, t_rayo primary, t_light_point 
 	t_rayo		secondary;
 	t_vect3		originpoint;
 
-	originpoint = pointray(primary, intersection->lambda - 0.00001);
+	originpoint = pointray(primary, intersection->lambda - 0.000001);
 	secondary.punto = originpoint;
 	secondary.vector = distancevector(light.point, originpoint);
 	return (secondary);
@@ -64,22 +64,28 @@ t_intersection	*primaryray(t_scene *scene, t_rayo *ray, int pixelx, int pixelj)
 
 	*ray = cordtoray(pixelx, pixelj, scene);
 	intersection = raycollision(scene->objets, *ray);
+	if (intersection != NULL && intersection->lambda <= 0)
+	{
+		free(intersection);
+		intersection = NULL;
+	}
 	return (intersection);
 }
 
-t_color			secondaryray(t_scene *scene, t_rayo ray, t_intersection *intersectionobject)
+t_color			secondaryray(t_scene *scene, t_rayo raycam, t_intersection *intersectionobject)
 {
 	t_list_light	*light;
 	t_intersection	*lightobstacle;
 	double			distance[2];
 	t_color			color;
+	t_rayo			ray;
 
 	light = scene->lights;
 	ft_bzero(&color, sizeof(t_color));
 	while (light != NULL)
 	{
 		lightobstacle = NULL;
-		ray = raytolight(intersectionobject, ray, light->point);
+		ray = raytolight(intersectionobject, raycam, light->point);
 		distance[0] = distancepoint(ray.punto, light->point.point);
 		lightobstacle = raycollision(scene->objets, ray);
 		if (lightobstacle != NULL)

@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:46:28 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 21:31:40 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:18:21 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -40,15 +40,13 @@ void			writepixelimage(t_libx *libx, t_color color, int x, int y)
 
 	libx->img_addr = (int *)mlx_get_data_addr(libx->img_ptr, &bitpixel, &size_line, &endian);
 	libx->img_addr[(size_line / 4) * y + x] = colortoint(color);
+	mlx_pixel_put(libx->ptr, libx->win_ptr, x, y, colortoint(color));
 }
 
 void			showscene(t_libx *libx, t_arg *args, t_scene *scene)
 {
 	if (args->file_save == NULL)
-	{
 		mlx_put_image_to_window(libx->ptr, libx->win_ptr, libx->img_ptr, 0, 0);
-		mlx_loop(libx->ptr);
-	}
 	else
 		imagetofile((char *)libx->img_addr, args->file_save, scene->resolution);
 	mlx_destroy_image(libx->ptr, libx->img_ptr);

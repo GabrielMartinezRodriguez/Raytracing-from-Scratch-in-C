@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:47:09 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 20:58:57 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 14:22:33 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -33,5 +33,5 @@
 # include "arguments/arguments.h"
 # include "objects/objects.h"
 # include "load/load.h"
-# define ESC 27
+# define ESC 53
 #endif

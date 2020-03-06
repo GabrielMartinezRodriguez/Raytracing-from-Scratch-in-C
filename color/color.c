@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 17:46:07 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/04 21:41:08 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:17:59 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -18,7 +18,7 @@ t_color			anglecolor(t_color color, t_vect3 normal, t_vect3 raydir)
 
 	cos = angletwovectors(normal, raydir);
 	if (cos < 0)
-		ft_bzero(&color, sizeof(t_color));
+		ft_bzero(&color, sizeof(color));
 	color.red *= cos;
 	color.green *= cos;
 	color.blue *= cos;

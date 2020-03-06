@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 20:34:27 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 16:23:26 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:29:39 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -32,5 +32,5 @@ void			addobject(t_scene *scene, void *object);
 int				countwords(char **words);
 void			freespace(char **words);
 void			error(char *s);
-int             fundamentalsobjects(char *str);
+int				fundamentalsobjects(char *str);
 #endif

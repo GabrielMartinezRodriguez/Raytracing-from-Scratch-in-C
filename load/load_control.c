@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 23:31:49 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 21:11:53 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 17:45:05 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -59,7 +59,6 @@ int				loadscene(t_scene *scene, char *filename)
 	}
 	if (fundamentalsobjects("") == 0)
 		error("Faltan objetos necesarios");
-	inicamera(scene->camera, scene->resolution);
 	close(fd);
 	return (0);
 }

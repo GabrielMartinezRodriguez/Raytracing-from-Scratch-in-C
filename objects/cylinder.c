@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 23:21:03 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 16:28:07 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:26:59 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -54,7 +54,7 @@ void				rotatecollision(t_rayo *ray, t_cylinder *cyl)
 	cyl->vect2 = rotatevector(cyl->inversebase, cyl->vect2);
 }
 
-void			ini_tops(t_cylinder *cyl)
+void				ini_tops(t_cylinder *cyl)
 {
 	cyl->upper_top.center = pointvectorpoint(cyl->point, cyl->normal, cyl->height / 2);
 	cyl->lower_top.center = pointvectorpoint(cyl->point, cyl->normal, -cyl->height / 2);

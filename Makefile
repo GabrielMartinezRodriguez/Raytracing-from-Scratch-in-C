@@ -38,7 +38,7 @@ FLAGS = -Wall -Wextra -Werror
 FLAGS_LIBX = -lmlx -framework OpenGL -framework AppKit -lz
 
 $(NAME):
-		$(COMPILER) $(FLAGS) $(FLAGS_LIBX) $(SRCS) $(LIBX) -o $(NAME)
+		$(COMPILER) $(FLAGS) $(FLAGS_LIBX) $(SRCS) -o $(NAME)
 
 all: $(NAME)
 

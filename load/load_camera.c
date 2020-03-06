@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 23:31:45 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 20:03:47 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:29:23 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -28,8 +28,8 @@ void			loadresolution(t_scene *scene, char **words)
 
 void			loadcamera(t_scene *scene, char **words)
 {
-	static int countcalls = 0;
-	static t_camera *camera_list = NULL;
+	static int			countcalls = 0;
+	static t_camera		*camera_list = NULL;
 
 	countcalls++;
 	if (countwords(words) != 4)
@@ -48,6 +48,7 @@ void			loadcamera(t_scene *scene, char **words)
 	camera_list->origin = chargepoint(words[1]);
 	camera_list->direction = chargenormalizedvector(words[2]);
 	camera_list->fov_h = ft_atoi_double(words[3]);
+	inicamera(camera_list, scene->resolution);
 	fundamentalsobjects("camera");
 }
 

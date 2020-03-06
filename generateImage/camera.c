@@ -6,13 +6,13 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/03 20:01:38 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 20:06:16 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:35:39 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
 #include "generateimage.h"
 
-void	inicamera(t_camera *camera, t_resolution resolution)
+void		inicamera(t_camera *camera, t_resolution resolution)
 {
 	camera->vectorx = perpendicular_rand_vect(camera->direction);
 	camera->vectory = crossproduct(camera->vectorx, camera->direction);
@@ -23,20 +23,32 @@ void	inicamera(t_camera *camera, t_resolution resolution)
 	camera->depth = resolution.x / (2 * tan(camera->fov_h_rad / 2));
 }
 
-void	changecamera(t_scene *scene, int next)
+int			changecamera(t_scene *scene, int next)
 {
-	if(next == 1)
+	int		change;
+
+	change = 0;
+	if (next == 1)
 	{
-		if(scene->camera->next != NULL)
+		if (scene->camera->next != NULL)
+		{
+			change = 1;
+			write(1, "PROCESANDO...", 14);
 			scene->camera = scene->camera->next;
+		}
 		else
 			write(1, "HA LLEGADO A LA ULTIMA CAMARA, NO QUEDAN MAS CAMARAS\n", 54);
 	}
 	else
 	{
-		if(scene->camera->back != NULL)
+		if (scene->camera->back != NULL)
+		{
+			change = 1;
+			write(1, "PROCESANDO...", 14);
 			scene->camera = scene->camera->back;
+		}
 		else
 			write(1, "ESTAN EN LA PRIMERA CAMARA, AVANCE SI QUIERE CAMBIAR DE CAMARA\n", 64);
 	}
+	return (change);
 }

@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 20:50:48 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/04 22:40:42 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:18:40 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -27,7 +27,7 @@
 	double				pseudointersection(t_rayo ray, t_vect3 point, t_vect3 normal);
 	t_intersection		*spherecollision(t_rayo rayo, t_esfera *esfera);
 	t_square			*inisquare(t_square *square);
-	t_vect3				trisquare(t_triangle *sq, t_rayo ray);
+	t_vect3				squarenormal(t_square *sq, t_rayo ray);
 	t_intersection		*squarecollision(t_rayo ray, t_square *sq);
 	void				initriangle(t_triangle *triangle);
 	t_vect3				trinormal(t_triangle *tri, t_rayo ray);

@@ -6,7 +6,7 @@
 /*   By: gmartine <gmartine@student.42.fr>          +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2020/03/04 20:25:05 by gmartine          #+#    #+#             */
-/*   Updated: 2020/03/05 20:41:08 by gmartine         ###   ########.fr       */
+/*   Updated: 2020/03/06 21:35:16 by gmartine         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -27,7 +27,7 @@ void			writepixelimage(t_libx *libx, t_color color, int x, int y);
 t_rayo			cordtoray(int i, int j, t_scene *scene);
 t_rayo			raytolight(t_intersection *intersection, t_rayo primary, t_light_point light);
 t_intersection	*returnnear(t_intersection *first, t_intersection *second);
-t_intersection  *infront(t_intersection *intersection);
-void            changecamera(t_scene *scene, int next);
+t_intersection	*infront(t_intersection *intersection);
+int				changecamera(t_scene *scene, int next);
 int				esc_hook(int button, void *x);
 #endif
