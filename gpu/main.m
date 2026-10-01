@@ -13,6 +13,7 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <MetalFX/MetalFX.h>
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "scene_export.h"
@@ -55,6 +56,8 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLBuffer>				_objects;
 	id<MTLBuffer>				_lights;
 	id<MTLBuffer>				_nodes;
+	id<MTLFXSpatialScaler>		_scaler;
+	id<MTLTexture>				_lowres;
 	int							_nplanes;
 	id<MTLAccelerationStructure>	_accel;
 	id<MTLIntersectionFunctionTable>	_table;
@@ -265,16 +268,55 @@ static t_vec4		vec4(simd_float3 v)
 	desc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
 		width:_scene->width height:_scene->height mipmapped:NO];
-	desc.usage = MTLTextureUsageShaderWrite;
+	desc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead
+		| MTLTextureUsageRenderTarget;
 	desc.storageMode = MTLStorageModeShared;
 	return ([_device newTextureWithDescriptor:desc]);
+}
+
+/*
+** RT_SCALE < 1: se renderiza a menor resolucion y MetalFX (el equivalente
+** de Apple a DLSS/FSR) reescala a la resolucion final, como en los juegos.
+*/
+
+- (void)encodeScaledTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd
+{
+	float	scale = getenv("RT_SCALE") ? atof(getenv("RT_SCALE")) : 1;
+
+	if (scale >= 1)
+	{
+		[self encodeTo:texture buffer:cmd];
+		return ;
+	}
+	if (!_scaler || _scaler.outputWidth != texture.width)
+	{
+		MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
+		desc.inputWidth = (NSUInteger)(texture.width * scale);
+		desc.inputHeight = (NSUInteger)(texture.height * scale);
+		desc.outputWidth = texture.width;
+		desc.outputHeight = texture.height;
+		desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm;
+		desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
+		desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+		_scaler = [desc newSpatialScalerWithDevice:_device];
+		MTLTextureDescriptor *td = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+			width:desc.inputWidth height:desc.inputHeight mipmapped:NO];
+		td.usage = MTLTextureUsageShaderWrite | _scaler.colorTextureUsage;
+		td.storageMode = MTLStorageModePrivate;
+		_lowres = [_device newTextureWithDescriptor:td];
+	}
+	[self encodeTo:_lowres buffer:cmd];
+	_scaler.colorTexture = _lowres;
+	_scaler.outputTexture = texture;
+	[_scaler encodeToCommandBuffer:cmd];
 }
 
 - (double)renderOnce:(id<MTLTexture>)texture
 {
 	id<MTLCommandBuffer>	cmd = [_queue commandBuffer];
 
-	[self encodeTo:texture buffer:cmd];
+	[self encodeScaledTo:texture buffer:cmd];
 	[cmd commit];
 	[cmd waitUntilCompleted];
 	if (cmd.error)

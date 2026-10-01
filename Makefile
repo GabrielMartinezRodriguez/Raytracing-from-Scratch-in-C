@@ -57,7 +57,7 @@ GPU_SRCS = $(SRCS_LIB) $(SRCS_GNL) $(SRCS_LD) $(SRCS_MATHS) $(SRCS_MATRIX) \
 
 GPU_FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit \
 		-framework QuartzCore -framework ImageIO -framework CoreGraphics \
-		-framework UniformTypeIdentifiers
+		-framework UniformTypeIdentifiers -framework MetalFX
 
 # El shader se compila en tiempo de ejecucion: se incrusta como string C
 # con shared.h pegado dentro (newLibraryWithSource no resuelve #include).
