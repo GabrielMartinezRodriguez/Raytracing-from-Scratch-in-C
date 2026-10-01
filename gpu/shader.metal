@@ -343,7 +343,12 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 		float3 n = normalize(hit.normal);
 		if (dot(n, d) > 0)
 			n = -n;
-		float3 p = o + hit.t * d + n * EPSILON;
+		float3 p = o + hit.t * d;
+		/*
+		** El error de coma flotante crece con la distancia al origen: un
+		** desplazamiento fijo deja "acne" (puntos negros) en escenas grandes.
+		*/
+		p += n * EPSILON * max(1.0f, length(p) * 0.1f);
 		float3 albedo = obj.color.xyz;
 		float3 local = albedo * f.ambient.xyz;
 		bool shadows = max3(weight.x, weight.y, weight.z) >= SHADOW_MIN_WEIGHT;
