@@ -433,9 +433,18 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 	int samples = f.pass == 1 ? 1 : f.samples;
 	float depth = w / (2 * tan(f.fov * M_PI_F / 360));
 	float3 color = float3(0);
+	/*
+	** En el refinado con un numero impar de muestras, la central coincide
+	** con el rayo de la primera pasada: se reutiliza en vez de repetirlo.
+	*/
+	int reuse = f.pass == 2 && samples % 2 == 1 ? samples / 2 : -1;
+	if (reuse >= 0)
+		color = pow(base.read(gid).rgb, GAMMA);
 	for (int sy = 0; sy < samples; sy++)
 		for (int sx = 0; sx < samples; sx++)
 		{
+			if (sx == reuse && sy == reuse)
+				continue ;
 			float px = gid.x + (sx + 0.5) / samples - 0.5;
 			float py = gid.y + (sy + 0.5) / samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
