@@ -41,6 +41,13 @@ typedef struct			s_color
 	unsigned char	blue;
 }						t_color;
 
+typedef struct			s_rgb
+{
+	double		r;
+	double		g;
+	double		b;
+}						t_rgb;
+
 typedef struct			s_colors_reflected
 {
 	t_color		color_lights;
@@ -143,6 +150,7 @@ typedef struct			s_list_obj
 	void				*object;
 	void				*functioncoll;
 	t_object			type;
+	double				reflect;
 	struct s_list_obj	*next;
 }						t_list_obj;
 
@@ -199,6 +207,7 @@ typedef struct			s_intersection
 	void					*object;
 	t_vect3					normal;
 	t_color					color;
+	double					reflect;
 }						t_intersection;
 
 typedef struct			s_bmp_file

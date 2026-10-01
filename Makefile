@@ -31,11 +31,11 @@ SRCS_INP = $(wildcard input_loop/*.c)
 SRCS =  $(SRCS_RT) $(SRCS_LIB) $(SRCS_GNL) $(SRCS_ARG) $(SRCS_CLR) $(SRCS_GNI) $(SRCS_BMP) \
 		$(SRCS_LD) $(SRCS_MATHS) $(SRCS_MATRIX) $(SRCS_VECTOR) $(SRCS_OBJ) $(SRCS_LIBX) $(SRCS_INP) main.c
 
-COMPILER = gcc
+COMPILER = clang -arch x86_64 -O2
 
-FLAGS = -Wall -Wextra -Werror
+FLAGS = -Wall -Wextra -Werror -Wno-unused-but-set-parameter -Wno-unused-but-set-variable
 
-FLAGS_LIBX = -lmlx -framework OpenGL -framework AppKit -lz
+FLAGS_LIBX = -L. -lmlx -lpthread -framework OpenGL -framework AppKit -lz
 
 $(NAME):
 		$(COMPILER) $(FLAGS) $(FLAGS_LIBX) $(SRCS) -o $(NAME)

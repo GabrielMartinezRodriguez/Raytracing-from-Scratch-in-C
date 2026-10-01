@@ -34,7 +34,6 @@ t_intersection		*trianglecollision(t_rayo ray, t_triangle *tri)
 	t_tupla				solution;
 	t_vect3				pointinter;
 
-	initriangle(tri);
 	lambda = pseudointersection(ray, tri->point1, tri->normal);
 	if (lambda <= 0)
 		return (NULL);

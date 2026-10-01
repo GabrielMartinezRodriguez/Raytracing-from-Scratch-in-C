@@ -14,11 +14,14 @@
 
 void		inicamera(t_camera *camera, t_resolution resolution)
 {
-	camera->vectorx = perpendicular_rand_vect(camera->direction);
-	camera->vectory = crossproduct(camera->vectorx, camera->direction);
-	camera->vectorx = changelenght(camera->vectorx, 1);
-	camera->vectory = changelenght(camera->vectory, 1);
+	t_vect3	up;
+
 	camera->direction = changelenght(camera->direction, 1);
+	up = newvector(0, 1, 0);
+	if (camera->direction.x == 0 && camera->direction.z == 0)
+		up = newvector(0, 0, 1);
+	camera->vectorx = changelenght(crossproduct(up, camera->direction), 1);
+	camera->vectory = crossproduct(camera->direction, camera->vectorx);
 	camera->fov_h_rad = (camera->fov_h / 360) * 2 * M_PI;
 	camera->depth = resolution.x / (2 * tan(camera->fov_h_rad / 2));
 }

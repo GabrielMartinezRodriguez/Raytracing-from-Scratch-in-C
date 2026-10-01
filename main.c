@@ -16,6 +16,7 @@ int				main(int arg_n, char **arg_s)
 {
 	t_data_struct data;
 
+	ft_bzero(&data, sizeof(t_data_struct));
 	data.args = process_args(arg_n, arg_s);
 	loadscene(&data.scene, data.args.file_load);
 	ini_libx(&data);

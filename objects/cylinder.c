@@ -18,7 +18,6 @@ t_intersection		*cylindercollision(t_rayo ray, t_cylinder *cyl)
 	t_intersection	*returned;
 
 	intersection = ft_calloc(3, sizeof(t_intersection *));
-	ini_tops(cyl);
 	intersection[0] = cylindercollisiontransformed(ray, *cyl);
 	intersection[1] = circlecollision(ray, &(cyl->upper_top));
 	intersection[2] = circlecollision(ray, &(cyl->lower_top));

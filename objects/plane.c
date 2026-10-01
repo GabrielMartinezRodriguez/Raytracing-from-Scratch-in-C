@@ -40,7 +40,6 @@ t_intersection	*planecollision(t_rayo ray, t_plane *pl)
 	t_tupla				productoz;
 	t_intersection		*returned;
 
-	iniplane(pl);
 	productox = newtupla(ray.vector.x, ray.punto.x);
 	productoy = newtupla(ray.vector.y, ray.punto.y);
 	productoz = newtupla(ray.vector.z, ray.punto.z);

@@ -12,37 +12,6 @@
 
 #include "generateimage.h"
 
-t_color			calccolor(t_intersection *intersection, t_rayo ray, double intesity, t_color colorlight)
-{
-	t_color color;
-
-	color = reflectedcolor(intersection->color, colorlight);
-	color = anglecolor(color, intersection->normal, ray.vector);
-	color = intensitycolor(color, intesity);
-	return (color);
-}
-
-t_color			ambientlight(t_scene *scene, t_intersection *intersection)
-{
-	t_color	new_color;
-
-	ft_bzero(&new_color, sizeof(new_color));
-	new_color = reflectedcolor(intersection->color, scene->env_light.color);
-	new_color = intensitycolor(new_color, scene->env_light.intensity);
-	return (new_color);
-}
-
-void			writepixelimage(t_libx *libx, t_color color, int x, int y)
-{
-	int bitpixel;
-	int size_line;
-	int endian;
-
-	libx->img_addr = (int *)mlx_get_data_addr(libx->img_ptr, &bitpixel, &size_line, &endian);
-	libx->img_addr[(size_line / 4) * y + x] = colortoint(color);
-	mlx_pixel_put(libx->ptr, libx->win_ptr, x, y, colortoint(color));
-}
-
 void			showscene(t_libx *libx, t_arg *args, t_scene *scene)
 {
 	if (args->file_save == NULL)
@@ -52,34 +21,77 @@ void			showscene(t_libx *libx, t_arg *args, t_scene *scene)
 	mlx_destroy_image(libx->ptr, libx->img_ptr);
 }
 
+/*
+** Supersampling: AA_SAMPLES x AA_SAMPLES rayos por pixel, repartidos en
+** rejilla, y se promedia el color en espacio lineal.
+*/
+
+static t_rgb	renderpixel(t_scene *scene, int x, int y)
+{
+	t_rgb	color;
+	int		sx;
+	int		sy;
+
+	color = newrgb(0, 0, 0);
+	sy = 0;
+	while (sy < AA_SAMPLES)
+	{
+		sx = 0;
+		while (sx < AA_SAMPLES)
+		{
+			color = addrgb(color, trace(scene, cordtoray(scene,
+				x + (sx + 0.5) / AA_SAMPLES - 0.5,
+				y + (sy + 0.5) / AA_SAMPLES - 0.5), 0));
+			sx++;
+		}
+		sy++;
+	}
+	return (scalergb(color, 1.0 / (AA_SAMPLES * AA_SAMPLES)));
+}
+
+static void		*renderrows(void *arg)
+{
+	t_worker	*worker;
+	int			x;
+	int			y;
+
+	worker = arg;
+	y = worker->index;
+	while (y < worker->scene->resolution.y)
+	{
+		x = 0;
+		while (x < worker->scene->resolution.x)
+		{
+			worker->pixels[worker->line * y + x] =
+				rgbtoint(renderpixel(worker->scene, x, y));
+			x++;
+		}
+		y += THREADS;
+	}
+	return (NULL);
+}
+
 void			generateimage(t_scene scene, t_libx *libx)
 {
-	int					i;
-	int					j;
-	t_intersection		*intersection;
-	t_colors_reflected	colors;
-	t_rayo				ray;
+	pthread_t	threads[THREADS];
+	t_worker	workers[THREADS];
+	int			bitpixel;
+	int			size_line;
+	int			endian;
+	int			i;
 
 	libx->img_ptr = mlx_new_image(libx->ptr, scene.resolution.x, scene.resolution.y);
-	ft_bzero(&colors, sizeof(t_colors_reflected));
-	i = 0;
-	j = 0;
-	while (i < scene.resolution.y)
+	libx->img_addr = (int *)mlx_get_data_addr(libx->img_ptr, &bitpixel, &size_line, &endian);
+	i = -1;
+	while (++i < THREADS)
 	{
-		while (j < scene.resolution.x)
-		{
-			intersection = primaryray(&scene, &ray, j, i);
-			if (intersection != NULL)
-			{
-				colors.color_lights = secondaryray(&scene, ray, intersection);
-				colors.color_ambient = ambientlight(&scene, intersection);
-				writepixelimage(libx, fusion_colors(colors), j, i);
-			}
-			if (intersection != NULL)
-				free(intersection);
-			j++;
-		}
-		i++;
-		j = 0;
+		workers[i].scene = &scene;
+		workers[i].pixels = libx->img_addr;
+		workers[i].line = size_line / 4;
+		workers[i].index = i;
+		pthread_create(&threads[i], NULL, renderrows, &workers[i]);
 	}
+	i = -1;
+	while (++i < THREADS)
+		pthread_join(threads[i], NULL);
 }

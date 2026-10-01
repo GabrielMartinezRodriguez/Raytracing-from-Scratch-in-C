@@ -16,6 +16,7 @@
 
 int				loadscene(t_scene *scene, char *filename);
 void			processstring(t_scene *scene, char **words);
+void			loadreflect(t_list_obj *lista, char **words, int index);
 void			loadtriangle(t_scene *scene, char **words);
 void			loadcylinder(t_scene *scene, char **words);
 void			loadsquare(t_scene *scene, char **words);
