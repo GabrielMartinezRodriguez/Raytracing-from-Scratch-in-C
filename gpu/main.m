@@ -23,7 +23,7 @@
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
 	KEY_1 = 18, KEY_2 = 19, KEY_3 = 20, KEY_4 = 21, KEY_ESC = 53,
-	KEY_LEFT = 123, KEY_RIGHT = 124 };
+	KEY_LEFT = 123, KEY_RIGHT = 124, KEY_T = 17 };
 
 static simd_float3	xyz(t_vec4 v)
 {
@@ -37,6 +37,8 @@ static t_vec4		vec4(simd_float3 v)
 
 @interface Renderer : NSObject <MTKViewDelegate>
 @property (nonatomic) int samples;
+@property (nonatomic) float moveSpeed;
+@property (nonatomic) bool temporalOn;
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
@@ -113,6 +115,7 @@ static t_vec4		vec4(simd_float3 v)
 	self = [super init];
 	_scene = scene;
 	_samples = 3;
+	_moveSpeed = 20;
 	_device = MTLCreateSystemDefaultDevice();
 	_queue = [_device newCommandQueue];
 	options.mathMode = MTLMathModeFast;
@@ -632,7 +635,7 @@ static bool		has_transparency(CGImageRef img)
 {
 	float	scale = getenv("RT_SCALE") ? atof(getenv("RT_SCALE")) : 1;
 
-	if (getenv("RT_TEMPORAL"))
+	if (_temporalOn || getenv("RT_TEMPORAL"))
 	{
 		[self encodeTemporalTo:texture scale:(scale < 1 ? scale : 0.5f)
 			buffer:cmd];
@@ -753,6 +756,8 @@ static bool		has_transparency(CGImageRef img)
 		exit(0);
 	if (key >= KEY_1 && key <= KEY_4)
 		_samples = key - KEY_1 + 1;
+	if (key == KEY_T)
+		_temporalOn = !_temporalOn;
 	if (key == KEY_RIGHT && _camera + 1 < _scene->ncameras)
 		[self useCamera:_camera + 1];
 	if (key == KEY_LEFT && _camera > 0)
@@ -783,7 +788,7 @@ static bool		has_transparency(CGImageRef img)
 	simd_float3	fwd = [self forward];
 	simd_float3	right = simd_normalize(simd_cross(
 		simd_make_float3(0, 1, 0), fwd));
-	float		speed = dt * (_fast ? 60 : 20);
+	float		speed = dt * _moveSpeed * (_fast ? 3 : 1);
 
 	_position += fwd * speed * (_keys[KEY_W] - _keys[KEY_S]);
 	_position += right * speed * (_keys[KEY_D] - _keys[KEY_A]);
@@ -802,7 +807,7 @@ static bool		has_transparency(CGImageRef img)
 	if (!drawable)
 		return ;
 	cmd = [_queue commandBuffer];
-	[self encodeTo:drawable.texture buffer:cmd];
+	[self encodeScaledTo:drawable.texture buffer:cmd];
 	[cmd presentDrawable:drawable];
 	[cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
 		self->_gpuMs = (done.GPUEndTime - done.GPUStartTime) * 1000;
@@ -812,9 +817,11 @@ static bool		has_transparency(CGImageRef img)
 	{
 		view.window.title = [NSString stringWithFormat:
 			@"raytracing majestuoso (GPU) - %.0f fps"
-			" - GPU %.2f ms/frame - %dx%d - AA %dx%d",
+			" - GPU %.2f ms/frame - %dx%d - %@",
 			_frames / (now - _fpsStart), _gpuMs, (int)drawable.texture.width,
-			(int)drawable.texture.height, _samples, _samples];
+			(int)drawable.texture.height, _temporalOn
+			? @"temporal 1/2 res (T)" : [NSString stringWithFormat:
+			@"AA %dx%d (T: temporal)", _samples, _samples]];
 		_frames = 0;
 		_fpsStart = now;
 	}
@@ -1017,6 +1024,7 @@ int				main(int argc, char **argv)
 				break ;
 			}
 		export_scene(argv[1], &scene);
+		float model_size = 0;
 		t_gpu_mesh mesh;
 		memset(&mesh, 0, sizeof(mesh));
 		if (obj_path)
@@ -1036,9 +1044,19 @@ int				main(int argc, char **argv)
 			printf("modelo cargado en %.0f ms; limites (%.1f, %.1f, %.1f) a "
 				"(%.1f, %.1f, %.1f)\n", (CACurrentMediaTime() - t0) * 1000,
 				lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+			model_size = simd_length(hi - lo);
 		}
 		renderer = [[Renderer alloc] initWithScene:&scene
 			mesh:obj_path ? &mesh : NULL];
+		/*
+		** Con modelo: velocidad de paseo proporcional a su tamano (~4 m/s en
+		** San Miguel) y reescalado temporal activado en la ventana.
+		*/
+		if (model_size > 0)
+		{
+			renderer.moveSpeed = model_size * 0.05f;
+			renderer.temporalOn = argc < 3;
+		}
 		if (argc >= 3 && strcmp(argv[2], "--save") == 0)
 		{
 			id<MTLTexture> texture = [renderer offscreenTexture];
