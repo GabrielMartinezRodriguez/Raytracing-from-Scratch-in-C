@@ -236,6 +236,17 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 	}
 	if (f.nobjects == f.nplanes)
 		return (hit);
+	/*
+	** Si el rayo no toca la caja que envuelve todos los objetos, ni se
+	** llama al hardware (p. ej. reflejos del suelo que suben al cielo).
+	*/
+	float3 inv = 1.0f / d;
+	float3 t0 = (f.scene_min.xyz - o) * inv;
+	float3 t1 = (f.scene_max.xyz - o) * inv;
+	float3 lo = min(t0, t1);
+	float3 hi = max(t0, t1);
+	if (max(max(lo.x, lo.y), max(lo.z, 0.0f)) > min(min(hi.x, hi.y), min(hi.z, hit.t)))
+		return (hit);
 	intersector<> isect;
 	isect.assume_geometry_type(geometry_type::bounding_box);
 	isect.accept_any_intersection(any);

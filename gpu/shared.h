@@ -80,6 +80,8 @@ typedef struct	s_gpu_frame
 	int			nplanes;
 	int			pass;
 	int			pad[2];
+	t_vec4		scene_min;
+	t_vec4		scene_max;
 }				t_gpu_frame;
 
 #endif

@@ -73,6 +73,8 @@ static t_vec4		vec4(simd_float3 v)
 	CFTimeInterval				_last;
 	CFTimeInterval				_fpsStart;
 	int							_frames;
+	simd_float4					_sceneMin;
+	simd_float4					_sceneMax;
 	double						_gpuMs;
 }
 
@@ -156,9 +158,13 @@ static t_vec4		vec4(simd_float3 v)
 	float		lo[3];
 	float		hi[3];
 
+	_sceneMin = simd_make_float4(INFINITY, INFINITY, INFINITY, 0);
+	_sceneMax = simd_make_float4(-INFINITY, -INFINITY, -INFINITY, 0);
 	for (int i = 0; i < n; i++)
 	{
 		object_bounds(&_scene->objects[_nplanes + i], lo, hi);
+		_sceneMin = simd_min(_sceneMin, simd_make_float4(lo[0], lo[1], lo[2], 0));
+		_sceneMax = simd_max(_sceneMax, simd_make_float4(hi[0], hi[1], hi[2], 0));
 		b[i].min = MTLPackedFloat3Make(lo[0], lo[1], lo[2]);
 		b[i].max = MTLPackedFloat3Make(hi[0], hi[1], hi[2]);
 	}
@@ -238,6 +244,8 @@ static t_vec4		vec4(simd_float3 v)
 	f.nlights = _scene->nlights;
 	f.samples = _samples;
 	f.nplanes = _nplanes;
+	f.scene_min = _sceneMin - 0.01f;
+	f.scene_max = _sceneMax + 0.01f;
 	return (f);
 }
 
