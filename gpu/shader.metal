@@ -48,6 +48,7 @@ constant float	MESH_SPECULAR = 0.05;
 constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
+constant float	EXPOSURE = 1.0;
 constant float	EDGE = 0.1;
 constant float	SHADOW_MIN_WEIGHT = 0.25;
 constant float	TMIN = 1e-3;
@@ -430,6 +431,30 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 
 #endif
 
+/*
+** Cielo de las escenas con modelo: degradado de horizonte a cenit. En las
+** escenas .rt clasicas el fondo sigue siendo negro.
+*/
+
+static float3	sky(float3 d)
+{
+	float	up = clamp(d.y, 0.0f, 1.0f);
+
+	return (mix(float3(0.85f, 0.9f, 1.0f), float3(0.32f, 0.5f, 0.85f),
+		pow(up, 0.6f)) * 1.2f);
+}
+
+/*
+** Curva ACES (aproximacion de Narkowicz): comprime las luces altas como una
+** camara en vez de recortarlas a blanco.
+*/
+
+static float3	tonemap(float3 x)
+{
+	return (clamp((x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f)
+		+ 0.14f), 0.0f, 1.0f));
+}
+
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights,
@@ -443,7 +468,11 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 	{
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
+		{
+			if (f.ntris > 0)
+				color += weight * sky(d);
 			break ;
+		}
 		float3 n;
 		float3 ng;
 		float3 albedo;
@@ -608,7 +637,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float py = gid.y + (sy + 0.5) / samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
-			color += trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS);
+			float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS);
+			color += f.ntris > 0 ? tonemap(c * EXPOSURE) : c;
 		}
 	color /= samples * samples;
 	out.write(float4(pow(clamp(color, 0.0, 1.0), 1 / GAMMA), 1), gid);
