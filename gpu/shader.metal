@@ -3,10 +3,21 @@ using namespace metal;
 #ifdef HW_RT
 # include <metal_raytracing>
 using namespace raytracing;
+/*
+** Con una sola copia del modelo (MESH_INST sin definir) la malla va en una
+** estructura primitiva directa: sin el nivel de instancias, que cuesta ~30%.
+*/
+# ifdef MESH_INST
+#  define MESH_ACCEL instance_acceleration_structure
+#  define MESH_TAGS triangle_data, instancing
+# else
+#  define MESH_ACCEL primitive_acceleration_structure
+#  define MESH_TAGS triangle_data
+# endif
 # define ACCEL_DECL primitive_acceleration_structure accel, \
 	intersection_function_table<> table, \
-	instance_acceleration_structure mesh_accel, \
-	intersection_function_table<triangle_data, instancing> mesh_table, \
+	MESH_ACCEL mesh_accel, \
+	intersection_function_table<MESH_TAGS> mesh_table, \
 	device const t_gpu_tri *tris, device const GpuMaterial *mats, \
 	device const packed_float3 *mesh_pos, device const float4 *insts
 # define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, \
@@ -256,7 +267,11 @@ static float2	tri_uv(device const t_gpu_tri &t, float2 b)
 ** punto tocado del triangulo es opaco segun el canal alfa de la textura.
 */
 
+#ifdef MESH_INST
 [[intersection(triangle, triangle_data, instancing)]]
+#else
+[[intersection(triangle, triangle_data)]]
+#endif
 bool			alpha_test(uint pid [[primitive_id]],
 					float2 bary [[barycentric_coord]],
 					device const t_gpu_tri *tris [[buffer(0)]],
@@ -317,18 +332,23 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 	}
 	if (f.ntris > 0)
 	{
-		intersector<triangle_data, instancing> mi;
+		intersector<MESH_TAGS> mi;
 		mi.assume_geometry_type(geometry_type::triangle);
 		mi.accept_any_intersection(any);
 		ray mr(o, d, 0.0f, hit.t);
-		intersection_result<triangle_data, instancing> mres = mi.intersect(mr,
-			mesh_accel, mesh_table);
+		intersection_result<MESH_TAGS> mres = mi.intersect(mr, mesh_accel,
+			mesh_table);
 		if (mres.type == intersection_type::triangle)
 		{
 			uint tri = (mres.geometry_id == 0 && f.nopaque > 0)
 				? mres.primitive_id : f.nopaque + mres.primitive_id;
+#ifdef MESH_INST
+			int inst = (int)mres.instance_id;
+#else
+			int inst = 0;
+#endif
 			hit = {mres.distance, float3(0), (int)tri,
-				mres.triangle_barycentric_coord, true, (int)mres.instance_id};
+				mres.triangle_barycentric_coord, true, inst};
 			if (any)
 				return (hit);
 		}
@@ -757,8 +777,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 #ifdef HW_RT
 					primitive_acceleration_structure accel [[buffer(3)]],
 					intersection_function_table<> table [[buffer(4)]],
-					instance_acceleration_structure mesh_accel [[buffer(8)]],
-					intersection_function_table<triangle_data, instancing> mesh_table [[buffer(9)]],
+					MESH_ACCEL mesh_accel [[buffer(8)]],
+					intersection_function_table<MESH_TAGS> mesh_table [[buffer(9)]],
 					device const t_gpu_tri *tris [[buffer(10)]],
 					device const GpuMaterial *mats [[buffer(11)]],
 					device const packed_float3 *mesh_pos [[buffer(12)]],

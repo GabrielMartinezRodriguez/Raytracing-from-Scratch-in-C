@@ -688,6 +688,15 @@ static bool		has_transparency(CGImageRef img)
 		[enc setIntersectionFunctionTable:_table atBufferIndex:4];
 		[enc useResource:_accel usage:MTLResourceUsageRead];
 	}
+	else if (_hardware && _meshPrim)
+	{
+		/*
+		** Sin objetos analiticos el kernel no usa esta estructura, pero el
+		** validador de Metal exige una del tipo correcto en su sitio.
+		*/
+		[enc setAccelerationStructure:_meshPrim atBufferIndex:3];
+		[enc setIntersectionFunctionTable:_meshTable atBufferIndex:4];
+	}
 	else
 		[enc setBuffer:_nodes offset:0 atIndex:3];
 	if (_meshAccel)
