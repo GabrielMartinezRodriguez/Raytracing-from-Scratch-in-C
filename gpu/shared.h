@@ -43,6 +43,39 @@ typedef struct	s_gpu_object
 	int			type;
 }				t_gpu_object;
 
+/*
+** Nodo del BVH (32 bytes). Si count > 0 es una hoja con los objetos
+** [first, first + count); si no, sus hijos son first y first + 1.
+*/
+
+typedef struct	s_gpu_node
+{
+	float		minx;
+	float		miny;
+	float		minz;
+	int			first;
+	float		maxx;
+	float		maxy;
+	float		maxz;
+	int			count;
+}				t_gpu_node;
+
+/*
+** Atributos de un triangulo de malla (.obj), 40 bytes: coordenadas de
+** textura de sus 3 vertices, normales de vertice comprimidas (octaedro,
+** 2 x 16 bits) e indice de material.
+*/
+
+typedef struct	s_gpu_tri
+{
+	float		uv[6];
+	unsigned int	n[3];
+	unsigned int	material;
+}				t_gpu_tri;
+
+# define MAT_TEXTURE 1
+# define MAT_ALPHA 2
+
 typedef struct	s_gpu_light
 {
 	t_vec4		position;
@@ -60,6 +93,21 @@ typedef struct	s_gpu_frame
 	int			nobjects;
 	int			nlights;
 	int			samples;
+	int			nplanes;
+	int			pass;
+	int			ntris;
+	int			nopaque;
+	float		spread;
+	int			ao_rays;
+	unsigned int	frame;
+	int			pad;
+	t_vec4		scene_min;
+	t_vec4		scene_max;
+	t_vec4		prev_origin;
+	t_vec4		prev_forward;
+	t_vec4		prev_right;
+	t_vec4		prev_up;
+	t_vec4		jitter;
 }				t_gpu_frame;
 
 #endif
