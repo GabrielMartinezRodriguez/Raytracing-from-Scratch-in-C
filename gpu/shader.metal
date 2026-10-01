@@ -49,6 +49,8 @@ constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
+constant int	AO_RAYS = 8;
+constant float	AO_RADIUS = 1.5;
 constant float	EDGE = 0.1;
 constant float	SHADOW_MIN_WEIGHT = 0.25;
 constant float	TMIN = 1e-3;
@@ -455,10 +457,49 @@ static float3	tonemap(float3 x)
 		+ 0.14f), 0.0f, 1.0f));
 }
 
+static uint		hash(uint x)
+{
+	x ^= x >> 16;
+	x *= 0x7feb352dU;
+	x ^= x >> 15;
+	x *= 0x846ca68bU;
+	x ^= x >> 16;
+	return (x);
+}
+
+/*
+** Oclusion ambiental: fraccion de AO_RAYS rayos cortos (AO_RADIUS) hacia
+** el hemisferio de la normal que no chocan con nada. Distribucion coseno
+** con una rotacion aleatoria por pixel.
+*/
+
+static float	ambient_occlusion(float3 p, float3 n, uint seed,
+					constant t_gpu_frame &f, device const t_gpu_object *objs,
+					ACCEL_DECL)
+{
+	float3	t = normalize(fabs(n.x) > 0.5f ? cross(n, float3(0, 1, 0))
+		: cross(n, float3(1, 0, 0)));
+	float3	b = cross(n, t);
+	float	r0 = (hash(seed) & 0xffff) / 65536.0f;
+	float	r1 = (hash(seed * 7 + 3) & 0xffff) / 65536.0f;
+	int		open = 0;
+
+	for (int i = 0; i < AO_RAYS; i++)
+	{
+		float u = fract(r0 + i * 0.618034f);
+		float v = fract(r1 + (i + 0.5f) / AO_RAYS);
+		float r = sqrt(v);
+		float phi = 2 * M_PI_F * u;
+		float3 dir = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(1 - v);
+		open += intersect(p, dir, f, objs, ACCEL_ARGS, AO_RADIUS, true).id < 0;
+	}
+	return ((float)open / AO_RAYS);
+}
+
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights,
-					ACCEL_DECL)
+					ACCEL_DECL, uint seed)
 {
 	float3 color = float3(0);
 	float3 weight = float3(1);
@@ -535,6 +576,8 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 		*/
 		p += ng * EPSILON * max(1.0f, length(p) * 0.1f);
 		float3 local = albedo * f.ambient.xyz;
+		if (f.ntris > 0 && depth == 0)
+			local *= ambient_occlusion(p, n, seed, f, objs, ACCEL_ARGS);
 		bool shadows = max3(weight.x, weight.y, weight.z) >= SHADOW_MIN_WEIGHT;
 		for (int i = 0; i < f.nlights; i++)
 		{
@@ -637,7 +680,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float py = gid.y + (sy + 0.5) / samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
-			float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS);
+			float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
+				hash(gid.x * 1973 + gid.y * 9277 + (sy * samples + sx) * 26699));
 			color += f.ntris > 0 ? tonemap(c * EXPOSURE) : c;
 		}
 	color /= samples * samples;
