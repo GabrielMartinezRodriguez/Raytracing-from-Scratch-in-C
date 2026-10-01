@@ -23,6 +23,7 @@ constant float	SPECULAR = 0.4;
 constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
+constant float	SHADOW_MIN_WEIGHT = 0.25;
 constant float	TMIN = 1e-3;
 constant float	NOHIT = 1e30f;
 
@@ -345,13 +346,14 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 		float3 p = o + hit.t * d + n * EPSILON;
 		float3 albedo = obj.color.xyz;
 		float3 local = albedo * f.ambient.xyz;
+		bool shadows = max3(weight.x, weight.y, weight.z) >= SHADOW_MIN_WEIGHT;
 		for (int i = 0; i < f.nlights; i++)
 		{
 			float3 tolight = lights[i].position.xyz - p;
 			float dist = length(tolight);
 			float3 l = tolight / dist;
 			float ndl = dot(n, l);
-			if (ndl <= 0 || intersect(p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0)
+			if (ndl <= 0 || (shadows && intersect(p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0))
 				continue ;
 			float3 lc = lights[i].color.xyz;
 			local += albedo * lc * ndl;
