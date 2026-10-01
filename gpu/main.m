@@ -16,6 +16,7 @@
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "scene_export.h"
+#include "bvh.h"
 #include "shader_src.h"
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
@@ -52,6 +53,8 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLComputePipelineState>	_pipeline;
 	id<MTLBuffer>				_objects;
 	id<MTLBuffer>				_lights;
+	id<MTLBuffer>				_nodes;
+	int							_nplanes;
 	simd_float3					_position;
 	float						_yaw;
 	float						_pitch;
@@ -86,6 +89,15 @@ static t_vec4		vec4(simd_float3 v)
 	}
 	_pipeline = [_device newComputePipelineStateWithFunction:
 		[library newFunctionWithName:@"render"] error:&error];
+	int nnodes;
+	CFTimeInterval t0 = CACurrentMediaTime();
+	t_gpu_node *nodes = build_bvh(scene, &nnodes, &_nplanes);
+	printf("BVH: %d nodos en %.1f ms\n", nnodes,
+		(CACurrentMediaTime() - t0) * 1000);
+	_nodes = [_device newBufferWithBytes:nodes
+		length:sizeof(t_gpu_node) * (nnodes + 1)
+		options:MTLResourceStorageModeShared];
+	free(nodes);
 	_objects = [_device newBufferWithBytes:scene->objects
 		length:sizeof(t_gpu_object) * (scene->nobjects + 1)
 		options:MTLResourceStorageModeShared];
@@ -135,6 +147,7 @@ static t_vec4		vec4(simd_float3 v)
 	f.nobjects = _scene->nobjects;
 	f.nlights = _scene->nlights;
 	f.samples = _samples;
+	f.nplanes = _nplanes;
 	return (f);
 }
 
@@ -151,6 +164,7 @@ static t_vec4		vec4(simd_float3 v)
 	[enc setBytes:&f length:sizeof(f) atIndex:0];
 	[enc setBuffer:_objects offset:0 atIndex:1];
 	[enc setBuffer:_lights offset:0 atIndex:2];
+	[enc setBuffer:_nodes offset:0 atIndex:3];
 	[enc dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
 		threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
 	[enc endEncoding];
@@ -175,6 +189,8 @@ static t_vec4		vec4(simd_float3 v)
 	[self encodeTo:texture buffer:cmd];
 	[cmd commit];
 	[cmd waitUntilCompleted];
+	if (cmd.error)
+		fprintf(stderr, "error GPU: %s\n", cmd.error.localizedDescription.UTF8String);
 	return ((cmd.GPUEndTime - cmd.GPUStartTime) * 1000);
 }
 
@@ -314,24 +330,32 @@ static void		save_png(id<MTLTexture> texture, const char *name)
 	printf("guardado %s\n", url.path.UTF8String);
 }
 
-static void		bench(Renderer *renderer)
+static int		cmp_double(const void *a, const void *b)
+{
+	double x = *(const double *)a;
+	double y = *(const double *)b;
+
+	return ((x > y) - (x < y));
+}
+
+/*
+** --bench [aa]: mediana de 15 frames con el antialiasing indicado (1 por
+** defecto). Imprime solo el numero para poder automatizar el registro.
+*/
+
+static void		bench(Renderer *renderer, int aa)
 {
 	id<MTLTexture>	texture = [renderer offscreenTexture];
-	double			total;
-	int				aa;
+	double			times[15];
 	int				i;
 
+	renderer.samples = aa;
 	[renderer renderOnce:texture];
-	for (aa = 1; aa <= 4; aa++)
-	{
-		renderer.samples = aa;
-		total = 0;
-		for (i = 0; i < 20; i++)
-			total += [renderer renderOnce:texture];
-		printf("%dx%d AA %dx%d: %.2f ms/frame (%.0f fps)\n",
-			(int)texture.width, (int)texture.height, aa, aa,
-			total / 20, 20000 / total);
-	}
+	for (i = 0; i < 15; i++)
+		times[i] = [renderer renderOnce:texture];
+	qsort(times, 15, sizeof(double), cmp_double);
+	printf("bench %dx%d AA %dx%d: %.3f ms\n", (int)texture.width,
+		(int)texture.height, aa, aa, times[7]);
 }
 
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
@@ -388,11 +412,12 @@ int				main(int argc, char **argv)
 		if (argc >= 3 && strcmp(argv[2], "--save") == 0)
 		{
 			id<MTLTexture> texture = [renderer offscreenTexture];
+			renderer.samples = argc >= 5 ? atoi(argv[4]) : 3;
 			printf("render: %.2f ms\n", [renderer renderOnce:texture]);
 			save_png(texture, argc >= 4 ? argv[3] : "scene");
 		}
 		else if (argc >= 3 && strcmp(argv[2], "--bench") == 0)
-			bench(renderer);
+			bench(renderer, argc >= 4 ? atoi(argv[3]) : 1);
 		else
 			run_window(renderer, &scene);
 	}

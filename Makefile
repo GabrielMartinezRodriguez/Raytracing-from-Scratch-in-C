@@ -53,7 +53,7 @@ GPU_NAME = rt_gpu
 
 GPU_SRCS = $(SRCS_LIB) $(SRCS_GNL) $(SRCS_LD) $(SRCS_MATHS) $(SRCS_MATRIX) \
 		$(SRCS_VECTOR) $(SRCS_OBJ) generateImage/camera.c \
-		generateImage/intersections.c gpu/scene_export.c gpu/main.m
+		generateImage/intersections.c gpu/scene_export.c gpu/bvh.c gpu/main.m
 
 GPU_FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit \
 		-framework QuartzCore -framework ImageIO -framework CoreGraphics \

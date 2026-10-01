@@ -43,6 +43,23 @@ typedef struct	s_gpu_object
 	int			type;
 }				t_gpu_object;
 
+/*
+** Nodo del BVH (32 bytes). Si count > 0 es una hoja con los objetos
+** [first, first + count); si no, sus hijos son first y first + 1.
+*/
+
+typedef struct	s_gpu_node
+{
+	float		minx;
+	float		miny;
+	float		minz;
+	int			first;
+	float		maxx;
+	float		maxy;
+	float		maxz;
+	int			count;
+}				t_gpu_node;
+
 typedef struct	s_gpu_light
 {
 	t_vec4		position;
@@ -60,6 +77,8 @@ typedef struct	s_gpu_frame
 	int			nobjects;
 	int			nlights;
 	int			samples;
+	int			nplanes;
+	int			pad[3];
 }				t_gpu_frame;
 
 #endif

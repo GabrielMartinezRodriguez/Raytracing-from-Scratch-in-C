@@ -137,64 +137,127 @@ static float	hit_cylinder(float3 o, float3 d,
 	return (best);
 }
 
-static Hit		intersect(float3 o, float3 d,
-					device const t_gpu_object *objs, int count)
+static float		hit_object(float3 o, float3 d, device const t_gpu_object &obj,
+					thread float3 &normal)
 {
-	Hit		hit = {NOHIT, float3(0), -1};
+	float t;
+
+	switch (obj.type)
+	{
+		case GPU_SPHERE:
+			t = hit_sphere(o, d, obj.a.xyz, obj.radius);
+			normal = o + t * d - obj.a.xyz;
+			return (t);
+		case GPU_PLANE:
+			normal = obj.b.xyz;
+			return (hit_plane(o, d, obj.a.xyz, obj.b.xyz));
+		case GPU_SQUARE:
+			normal = obj.b.xyz;
+			return (hit_square(o, d, obj));
+		case GPU_TRIANGLE:
+			normal = cross(obj.b.xyz - obj.a.xyz, obj.c.xyz - obj.a.xyz);
+			return (hit_triangle(o, d, obj));
+		default:
+			return (hit_cylinder(o, d, obj, normal));
+	}
+}
+
+/*
+** Slab test: distancia de entrada a la caja, o NOHIT si no la toca antes
+** de tmax.
+*/
+
+static float	hit_box(float3 o, float3 inv, device const t_gpu_node &n,
+					float tmax)
+{
+	float3 t0 = (float3(n.minx, n.miny, n.minz) - o) * inv;
+	float3 t1 = (float3(n.maxx, n.maxy, n.maxz) - o) * inv;
+	float3 lo = min(t0, t1);
+	float3 hi = max(t0, t1);
+	float tin = max(max(lo.x, lo.y), max(lo.z, 0.0f));
+	float tout = min(min(hi.x, hi.y), min(hi.z, tmax));
+	return (tin <= tout ? tin : NOHIT);
+}
+
+#define STACK_SIZE 48
+
+/*
+** any = true: rayo de sombra, vale con encontrar cualquier objeto antes
+** de tmax (no hace falta el mas cercano).
+*/
+
+static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
+					device const t_gpu_object *objs,
+					device const t_gpu_node *nodes, float tmax, bool any)
+{
+	Hit		hit = {tmax, float3(0), -1};
 	float3	normal;
+	float3	inv = 1.0f / d;
+	int		stack[STACK_SIZE];
+	int		sp = 0;
 	float	t;
 
-	for (int i = 0; i < count; i++)
+	for (int i = 0; i < f.nplanes; i++)
 	{
-		device const t_gpu_object &obj = objs[i];
-		switch (obj.type)
-		{
-			case GPU_SPHERE:
-				t = hit_sphere(o, d, obj.a.xyz, obj.radius);
-				normal = o + t * d - obj.a.xyz;
-				break ;
-			case GPU_PLANE:
-				t = hit_plane(o, d, obj.a.xyz, obj.b.xyz);
-				normal = obj.b.xyz;
-				break ;
-			case GPU_SQUARE:
-				t = hit_square(o, d, obj);
-				normal = obj.b.xyz;
-				break ;
-			case GPU_TRIANGLE:
-				t = hit_triangle(o, d, obj);
-				normal = cross(obj.b.xyz - obj.a.xyz, obj.c.xyz - obj.a.xyz);
-				break ;
-			default:
-				t = hit_cylinder(o, d, obj, normal);
-				break ;
-		}
+		t = hit_object(o, d, objs[i], normal);
 		if (t < hit.t)
 		{
-			hit.t = t;
-			hit.normal = normal;
-			hit.id = i;
+			hit = {t, normal, i};
+			if (any)
+				return (hit);
 		}
+	}
+	if (f.nobjects == f.nplanes || hit_box(o, inv, nodes[0], hit.t) == NOHIT)
+		return (hit);
+	stack[sp++] = 0;
+	while (sp > 0)
+	{
+		device const t_gpu_node &node = nodes[stack[--sp]];
+		if (node.count > 0)
+		{
+			for (int i = node.first; i < node.first + node.count; i++)
+			{
+				t = hit_object(o, d, objs[i], normal);
+				if (t < hit.t)
+				{
+					hit = {t, normal, i};
+					if (any)
+						return (hit);
+				}
+			}
+			continue ;
+		}
+		float tl = hit_box(o, inv, nodes[node.first], hit.t);
+		float tr = hit_box(o, inv, nodes[node.first + 1], hit.t);
+		int near = node.first;
+		int far = node.first + 1;
+		if (tr < tl)
+		{
+			float tmp = tl;
+			tl = tr;
+			tr = tmp;
+			near = far;
+			far = node.first;
+		}
+		if (tr != NOHIT && sp < STACK_SIZE)
+			stack[sp++] = far;
+		if (tl != NOHIT && sp < STACK_SIZE)
+			stack[sp++] = near;
 	}
 	return (hit);
 }
 
-static bool		occluded(float3 p, float3 l, float dist,
-					device const t_gpu_object *objs, int count)
-{
-	return (intersect(p, l, objs, count).t < dist);
-}
-
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
-					device const t_gpu_light *lights)
+					device const t_gpu_light *lights,
+					device const t_gpu_node *nodes)
 {
 	float3 color = float3(0);
 	float3 weight = float3(1);
 
 	for (int depth = 0; depth <= MAX_DEPTH; depth++)
 	{
-		Hit hit = intersect(o, d, objs, f.nobjects);
+		Hit hit = intersect(o, d, f, objs, nodes, NOHIT, false);
 		if (hit.id < 0)
 			break ;
 		device const t_gpu_object &obj = objs[hit.id];
@@ -210,7 +273,7 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 			float dist = length(tolight);
 			float3 l = tolight / dist;
 			float ndl = dot(n, l);
-			if (ndl <= 0 || occluded(p, l, dist, objs, f.nobjects))
+			if (ndl <= 0 || intersect(p, l, f, objs, nodes, dist, true).id >= 0)
 				continue ;
 			float3 lc = lights[i].color.xyz;
 			local += albedo * lc * ndl;
@@ -238,6 +301,7 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					constant t_gpu_frame &f [[buffer(0)]],
 					device const t_gpu_object *objs [[buffer(1)]],
 					device const t_gpu_light *lights [[buffer(2)]],
+					device const t_gpu_node *nodes [[buffer(3)]],
 					uint2 gid [[thread_position_in_grid]])
 {
 	float w = out.get_width();
@@ -254,7 +318,7 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float py = gid.y + (sy + 0.5) / f.samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
-			color += trace(f.origin.xyz, d, f, objs, lights);
+			color += trace(f.origin.xyz, d, f, objs, lights, nodes);
 		}
 	color /= f.samples * f.samples;
 	out.write(float4(pow(clamp(color, 0.0, 1.0), 1 / GAMMA), 1), gid);
