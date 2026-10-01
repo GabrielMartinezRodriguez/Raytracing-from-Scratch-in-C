@@ -494,8 +494,9 @@ static bool		has_transparency(CGImageRef img)
 		t = 0.5f;
 	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
 	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
-	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm;
-	_yaw = _pathYaw + 0.25f * ty;
+	float len = getenv("RT_PATH_LEN") ? atof(getenv("RT_PATH_LEN")) : 1;
+	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm * len;
+	_yaw = _pathYaw + 0.25f * ty * len;
 	_frame = frame;
 }
 
@@ -743,7 +744,8 @@ static bool		has_transparency(CGImageRef img)
 
 	if (_giOn || getenv("RT_GI"))
 	{
-		[self encodeGITo:texture scale:(scale < 1 ? scale : 0.5f) buffer:cmd];
+		[self encodeGITo:texture scale:(getenv("RT_SCALE") ? scale : 0.5f)
+			buffer:cmd];
 		return ;
 	}
 	if (_temporalOn || getenv("RT_TEMPORAL"))
@@ -1178,6 +1180,48 @@ static void		path_bench(Renderer *renderer, int n, const char *prefix, int aa)
 	free(times);
 }
 
+/*
+** --video N salida.mp4 [fps]: renderiza N imagenes del recorrido y las pasa
+** en crudo a ffmpeg (H.264, calidad alta) sin escribir imagenes a disco.
+*/
+
+static void		render_video(Renderer *renderer, int n, const char *out, int fps)
+{
+	id<MTLTexture>	texture = [renderer offscreenTexture];
+	size_t			w = texture.width;
+	size_t			h = texture.height;
+	char			cmd[2048];
+	double			total = 0;
+	CFTimeInterval	t0 = CACurrentMediaTime();
+
+	snprintf(cmd, sizeof(cmd), "ffmpeg -loglevel error -y -f rawvideo "
+		"-pix_fmt bgra -s %zux%zu -r %d -i - -c:v libx264 -preset slow "
+		"-crf 16 -pix_fmt yuv420p '%s'", w, h, fps, out);
+	FILE *pipe = popen(cmd, "w");
+	if (!pipe)
+	{
+		fprintf(stderr, "error: no se pudo lanzar ffmpeg\n");
+		exit(1);
+	}
+	void *pixels = malloc(w * h * 4);
+	renderer.samples = 1;
+	for (int i = 0; i < n; i++)
+	{
+		[renderer pathAt:(float)i / (n - 1) frame:i];
+		total += [renderer renderOnce:texture];
+		[texture getBytes:pixels bytesPerRow:w * 4
+			fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+		fwrite(pixels, 1, w * h * 4, pipe);
+		if (i % 30 == 0)
+			fprintf(stderr, "\rimagen %d/%d", i + 1, n);
+	}
+	pclose(pipe);
+	free(pixels);
+	printf("\nvideo %s: %d imagenes %zux%zu, GPU %.1f ms/imagen de media, "
+		"%.1f s en total\n", out, n, w, h, total / n,
+		CACurrentMediaTime() - t0);
+}
+
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 {
 	NSApplication	*app = [NSApplication sharedApplication];
@@ -1284,6 +1328,9 @@ int				main(int argc, char **argv)
 			printf("render: %.2f ms\n", [renderer renderOnce:texture]);
 			save_png(texture, argc >= 4 ? argv[3] : "scene");
 		}
+		else if (argc >= 5 && strcmp(argv[2], "--video") == 0)
+			render_video(renderer, atoi(argv[3]), argv[4],
+				argc >= 6 ? atoi(argv[5]) : 30);
 		else if (argc >= 4 && strcmp(argv[2], "--path") == 0)
 			path_bench(renderer, atoi(argv[3]), argc >= 5 ? argv[4] : NULL,
 				argc >= 6 ? atoi(argv[5]) : 1);
