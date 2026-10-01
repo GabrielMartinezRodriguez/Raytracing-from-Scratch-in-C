@@ -11,7 +11,9 @@
 #include <string.h>
 #include "sim.h"
 
-enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA };
+enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA, SIM_ROTURA };
+
+#define SHARDS 14
 
 #define CLOTH_N 100
 #define CLOTH_THICK 0.006f
@@ -211,6 +213,168 @@ static void		static_world(t_sim *s, t_gpu_mesh *m)
 
 static void		cloth_setup(t_sim *s, t_gpu_mesh *m);
 
+/*
+** Prefractura del jarron: SHARDS puntos al azar dentro de su caja y cada
+** triangulo va al punto mas cercano (diagrama de Voronoi). Cada trozo pasa a
+** ser un objeto propio de la malla; mientras el jarron esta entero, todos
+** se mueven con el mismo cuerpo.
+*/
+
+static void		prefracture(t_sim *s, t_gpu_mesh *m)
+{
+	int			vase = find_obj(m, "ceramic_vase_01");
+	unsigned	seed = 777;
+	simd_float3	lo = simd_make_float3(1e30f, 1e30f, 1e30f), hi = -lo;
+	simd_float3	seeds[SHARDS];
+
+	if (vase < 0)
+		return ;
+	for (size_t i = 0; i < m->ntris; i++)
+		if (m->tri_obj[i] == (uint32_t)vase)
+			for (int k = 0; k < 3; k++)
+			{
+				simd_float3 p = simd_make_float3(m->pos[i * 9 + k * 3],
+					m->pos[i * 9 + k * 3 + 1], m->pos[i * 9 + k * 3 + 2]);
+				lo = simd_min(lo, p);
+				hi = simd_max(hi, p);
+			}
+	for (int k = 0; k < SHARDS; k++)
+		seeds[k] = lo + (hi - lo) * simd_make_float3(frand(&seed),
+			frand(&seed), frand(&seed));
+	m->obj_names = realloc(m->obj_names, 64 * (m->nobjs + SHARDS));
+	for (int k = 0; k < SHARDS; k++)
+	{
+		s->shard_obj[k] = m->nobjs;
+		snprintf(m->obj_names[m->nobjs++], 64, "vasija_trozo_%02d", k);
+	}
+	s->nshards = SHARDS;
+	for (size_t i = 0; i < m->ntris; i++)
+	{
+		if (m->tri_obj[i] != (uint32_t)vase)
+			continue ;
+		simd_float3 c = simd_make_float3(
+			m->pos[i * 9] + m->pos[i * 9 + 3] + m->pos[i * 9 + 6],
+			m->pos[i * 9 + 1] + m->pos[i * 9 + 4] + m->pos[i * 9 + 7],
+			m->pos[i * 9 + 2] + m->pos[i * 9 + 5] + m->pos[i * 9 + 8]) / 3;
+		int best = 0;
+		for (int k = 1; k < SHARDS; k++)
+			if (simd_distance(c, seeds[k]) < simd_distance(c, seeds[best]))
+				best = k;
+		m->tri_obj[i] = s->shard_obj[best];
+	}
+	s->shard_tris = malloc(sizeof(float *) * SHARDS);
+	s->shard_ntris = malloc(sizeof(int) * SHARDS);
+	for (int k = 0; k < SHARDS; k++)
+		s->shard_tris[k] = object_tris(m, s->shard_obj[k], &s->shard_ntris[k]);
+}
+
+/*
+** Jarron entero: un cuerpo con todos los triangulos de los trozos; se
+** suelta desde 1,4 m sobre el suelo, junto a la mesa, girando.
+*/
+
+static void		vase_setup(t_sim *s, t_gpu_mesh *m)
+{
+	int			total = 0;
+	float		*all;
+	t_psphere	*sp;
+	simd_float3	com;
+
+	for (int k = 0; k < s->nshards; k++)
+		total += s->shard_ntris[k];
+	all = malloc(sizeof(float) * 9 * (total + 1));
+	total = 0;
+	for (int k = 0; k < s->nshards; k++)
+	{
+		memcpy(all + 9 * total, s->shard_tris[k], sizeof(float) * 9
+			* s->shard_ntris[k]);
+		total += s->shard_ntris[k];
+	}
+	int ns = build_cluster(all, total, 9, &sp, &com);
+	float vol = 0;
+	for (int i = 0; i < ns; i++)
+		vol += 4.0f / 3.0f * (float)M_PI * sp[i].r * sp[i].r * sp[i].r;
+	s->vase_body = world_add_body(&s->w, sp, ns, 1.2f / vol, com);
+	t_body *b = &s->w.bodies[s->vase_body];
+	b->restitution = 0.1f;
+	b->pos = simd_make_float3(0.75f, 1.45f, 0.45f);
+	b->rot = simd_normalize(simd_quaternion(0.5f, simd_normalize(
+		simd_make_float3(1, 0, 0.4f))));
+	b->ang = simd_make_float3(1.5f, 0.5f, -2.0f);
+	for (int k = 0; k < s->nshards; k++)
+		s->obj_body[s->shard_obj[k]] = s->vase_body;
+	free(all);
+	free(sp);
+	(void)m;
+}
+
+/*
+** Rotura: si el jarron entero pierde de golpe mucha velocidad (impacto),
+** cada trozo pasa a ser un cuerpo propio con la velocidad que tenia ese
+** punto del jarron mas un pequeno empuje hacia fuera.
+*/
+
+static void		maybe_break(t_sim *s)
+{
+	t_body		*v = &s->w.bodies[s->vase_body];
+	unsigned	seed = 4242;
+
+	if (s->broken || simd_length(s->vase_vel) - simd_length(v->vel) < 1.2f)
+		return ;
+	s->broken = 1;
+	simd_float3 pre = s->vase_vel;
+	simd_float3 vcenter = v->pos;
+	float total_area = 0;
+	float area[32] = {0};
+	for (int k = 0; k < s->nshards; k++)
+	{
+		for (int t = 0; t < s->shard_ntris[k]; t++)
+		{
+			const float *p = s->shard_tris[k] + t * 9;
+			simd_float3 a = simd_make_float3(p[0], p[1], p[2]);
+			simd_float3 e1 = simd_make_float3(p[3], p[4], p[5]) - a;
+			simd_float3 e2 = simd_make_float3(p[6], p[7], p[8]) - a;
+			area[k] += 0.5f * simd_length(simd_cross(e1, e2));
+		}
+		total_area += area[k];
+	}
+	for (int k = 0; k < s->nshards; k++)
+	{
+		t_psphere *sp;
+		simd_float3 com;
+		if (s->shard_ntris[k] == 0)
+			continue ;
+		int ns = build_cluster(s->shard_tris[k], s->shard_ntris[k], 6, &sp,
+			&com);
+		float vol = 0;
+		for (int i = 0; i < ns; i++)
+			vol += 4.0f / 3.0f * (float)M_PI * sp[i].r * sp[i].r * sp[i].r;
+		/*
+		** Masa de cada trozo proporcional a su superficie (pared de grosor
+		** uniforme).
+		*/
+		int b = world_add_body(&s->w, sp, ns, 1.2f * area[k] / total_area
+			/ vol, com);
+		v = &s->w.bodies[s->vase_body];
+		t_body *sh = &s->w.bodies[b];
+		sh->rot = v->rot;
+		sh->pos = body_point(v, com);
+		simd_float3 out = simd_normalize(sh->pos - vcenter
+			+ simd_make_float3(0, 0.02f, 0));
+		sh->vel = pre * 0.45f + simd_cross(v->ang, sh->pos - v->pos)
+			+ out * (0.6f + frand(&seed) * 0.9f);
+		sh->ang = simd_make_float3(frand(&seed) - 0.5f, frand(&seed) - 0.5f,
+			frand(&seed) - 0.5f) * 14;
+		sh->restitution = 0.15f;
+		sh->friction = 0.6f;
+		s->obj_body[s->shard_obj[k]] = b;
+		free(sp);
+	}
+	s->w.bodies[s->vase_body].active = 0;
+	printf("\njarron roto en %d trozos a %.1f m/s\n", s->nshards,
+		simd_length(pre));
+}
+
 int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 {
 	unsigned	seed = 12345;
@@ -221,11 +385,12 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 	s->kind = strcmp(name, "frutas") == 0 ? SIM_FRUTAS
 		: strcmp(name, "lluvia") == 0 ? SIM_LLUVIA
 		: strcmp(name, "viento") == 0 ? SIM_VIENTO
-		: strcmp(name, "tela") == 0 ? SIM_TELA : SIM_NONE;
+		: strcmp(name, "tela") == 0 ? SIM_TELA
+		: strcmp(name, "rotura") == 0 ? SIM_ROTURA : SIM_NONE;
 	if (s->kind == SIM_NONE)
 	{
 		fprintf(stderr, "error: escenario desconocido '%s' (frutas, lluvia, "
-			"viento, tela)\n", name);
+			"viento, tela, rotura)\n", name);
 		return (-1);
 	}
 	if (s->kind == SIM_LLUVIA)
@@ -238,6 +403,8 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 			if (base[i % 3] >= 0)
 				clone_object(m, base[i % 3]);
 	}
+	if (s->kind == SIM_ROTURA)
+		prefracture(s, m);
 	s->nobjs = m->nobjs;
 	s->obj_body = malloc(sizeof(int) * m->nobjs);
 	for (int i = 0; i < m->nobjs; i++)
@@ -245,12 +412,16 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 	for (int i = 0; i < m->nobjs; i++)
 	{
 		const t_kind *k = kind_of(m->obj_names[i]);
+		if (s->kind == SIM_ROTURA && starts(m->obj_names[i], "vasija_trozo"))
+			continue ;
 		if (k && s->kind != SIM_VIENTO && s->kind != SIM_TELA)
 			make_body(s, m, i, k);
 	}
 	static_world(s, m);
 	world_settle(&s->w);
 	t_world *w = &s->w;
+	if (s->kind == SIM_ROTURA)
+		vase_setup(s, m);
 	if (s->kind == SIM_VIENTO)
 		s->wind = 1.0f;
 	else if (s->kind == SIM_TELA)
@@ -542,7 +713,11 @@ void			sim_advance(t_sim *s, float dt)
 {
 	if (dt <= 0)
 		return ;
+	if (s->nshards && !s->broken)
+		s->vase_vel = s->w.bodies[s->vase_body].vel;
 	world_step(&s->w, dt);
+	if (s->nshards)
+		maybe_break(s);
 	if (s->cloth.n)
 		cloth_step(s, dt);
 	s->time += dt;

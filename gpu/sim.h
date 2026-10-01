@@ -43,6 +43,13 @@ typedef struct	s_sim
 	simd_float3	wind_base;
 	float		wind_height;
 	t_cloth		cloth;
+	int			vase_body;
+	int			shard_obj[32];
+	int			nshards;
+	int			broken;
+	simd_float3	vase_vel;
+	float		**shard_tris;
+	int			*shard_ntris;
 }				t_sim;
 
 int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *mesh);
