@@ -1,0 +1,261 @@
+#include <metal_stdlib>
+using namespace metal;
+
+#include "shared.h"
+
+/*
+** Port a Metal de generateImage/shading.c: mismas intersecciones y mismo
+** sombreado (Blinn-Phong + sombras + reflejos + supersampling + gamma).
+** Cada hilo de la GPU calcula un pixel.
+*/
+
+constant int	MAX_DEPTH = 5;
+constant float	SPECULAR = 0.4;
+constant float	SHININESS = 60;
+constant float	GAMMA = 2.2;
+constant float	EPSILON = 1e-3;
+constant float	TMIN = 1e-3;
+constant float	NOHIT = INFINITY;
+
+struct			Hit
+{
+	float		t;
+	float3		normal;
+	int			id;
+};
+
+static float	hit_plane(float3 o, float3 d, float3 p, float3 n)
+{
+	float den = dot(d, n);
+
+	if (fabs(den) < 1e-8)
+		return (NOHIT);
+	float t = dot(p - o, n) / den;
+	return (t > TMIN ? t : NOHIT);
+}
+
+static float	hit_sphere(float3 o, float3 d, float3 c, float r)
+{
+	float3 oc = o - c;
+	float b = dot(oc, d);
+	float h = b * b - (dot(oc, oc) - r * r);
+
+	if (h < 0)
+		return (NOHIT);
+	h = sqrt(h);
+	if (-b - h > TMIN)
+		return (-b - h);
+	if (-b + h > TMIN)
+		return (-b + h);
+	return (NOHIT);
+}
+
+static float	hit_square(float3 o, float3 d, device const t_gpu_object &obj)
+{
+	float3 n = obj.b.xyz;
+	float t = hit_plane(o, d, obj.a.xyz, n);
+
+	if (t == NOHIT)
+		return (NOHIT);
+	float3 p = o + t * d - obj.a.xyz;
+	float3 u = obj.c.xyz;
+	float3 v = cross(n, u);
+	float half_side = obj.height / 2;
+	if (fabs(dot(p, u)) > half_side || fabs(dot(p, v)) > half_side)
+		return (NOHIT);
+	return (t);
+}
+
+static float	hit_triangle(float3 o, float3 d, device const t_gpu_object &obj)
+{
+	float3 e1 = obj.b.xyz - obj.a.xyz;
+	float3 e2 = obj.c.xyz - obj.a.xyz;
+	float3 pv = cross(d, e2);
+	float det = dot(e1, pv);
+
+	if (fabs(det) < 1e-8)
+		return (NOHIT);
+	float3 tv = o - obj.a.xyz;
+	float u = dot(tv, pv) / det;
+	if (u < 0 || u > 1)
+		return (NOHIT);
+	float3 qv = cross(tv, e1);
+	float v = dot(d, qv) / det;
+	if (v < 0 || u + v > 1)
+		return (NOHIT);
+	float t = dot(e2, qv) / det;
+	return (t > TMIN ? t : NOHIT);
+}
+
+/*
+** Cilindro finito con tapas: lateral (raices de la cuadratica dentro de la
+** altura) y dos discos en +-altura/2.
+*/
+
+static float	hit_cylinder(float3 o, float3 d,
+					device const t_gpu_object &obj, thread float3 &normal)
+{
+	float3 c = obj.a.xyz;
+	float3 axis = obj.b.xyz;
+	float r = obj.radius;
+	float hh = obj.height / 2;
+	float best = NOHIT;
+	float3 oc = o - c;
+	float da = dot(d, axis);
+	float oa = dot(oc, axis);
+	float3 dp = d - da * axis;
+	float3 op = oc - oa * axis;
+	float qa = dot(dp, dp);
+	float qb = 2 * dot(dp, op);
+	float disc = qb * qb - 4 * qa * (dot(op, op) - r * r);
+
+	if (qa > 1e-8 && disc >= 0)
+	{
+		float sq = sqrt(disc);
+		float roots[2] = {(-qb - sq) / (2 * qa), (-qb + sq) / (2 * qa)};
+		for (int i = 0; i < 2; i++)
+		{
+			float t = roots[i];
+			if (t > TMIN && fabs(oa + t * da) <= hh)
+			{
+				best = t;
+				normal = (op + t * dp) / r;
+				break ;
+			}
+		}
+	}
+	for (int s = -1; s <= 1; s += 2)
+	{
+		float3 cap = c + s * hh * axis;
+		float t = hit_plane(o, d, cap, axis);
+		if (t < best && length(o + t * d - cap) <= r)
+		{
+			best = t;
+			normal = s * axis;
+		}
+	}
+	return (best);
+}
+
+static Hit		intersect(float3 o, float3 d,
+					device const t_gpu_object *objs, int count)
+{
+	Hit		hit = {NOHIT, float3(0), -1};
+	float3	normal;
+	float	t;
+
+	for (int i = 0; i < count; i++)
+	{
+		device const t_gpu_object &obj = objs[i];
+		switch (obj.type)
+		{
+			case GPU_SPHERE:
+				t = hit_sphere(o, d, obj.a.xyz, obj.radius);
+				normal = o + t * d - obj.a.xyz;
+				break ;
+			case GPU_PLANE:
+				t = hit_plane(o, d, obj.a.xyz, obj.b.xyz);
+				normal = obj.b.xyz;
+				break ;
+			case GPU_SQUARE:
+				t = hit_square(o, d, obj);
+				normal = obj.b.xyz;
+				break ;
+			case GPU_TRIANGLE:
+				t = hit_triangle(o, d, obj);
+				normal = cross(obj.b.xyz - obj.a.xyz, obj.c.xyz - obj.a.xyz);
+				break ;
+			default:
+				t = hit_cylinder(o, d, obj, normal);
+				break ;
+		}
+		if (t < hit.t)
+		{
+			hit.t = t;
+			hit.normal = normal;
+			hit.id = i;
+		}
+	}
+	return (hit);
+}
+
+static bool		occluded(float3 p, float3 l, float dist,
+					device const t_gpu_object *objs, int count)
+{
+	return (intersect(p, l, objs, count).t < dist);
+}
+
+static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
+					device const t_gpu_object *objs,
+					device const t_gpu_light *lights)
+{
+	float3 color = float3(0);
+	float3 weight = float3(1);
+
+	for (int depth = 0; depth <= MAX_DEPTH; depth++)
+	{
+		Hit hit = intersect(o, d, objs, f.nobjects);
+		if (hit.id < 0)
+			break ;
+		device const t_gpu_object &obj = objs[hit.id];
+		float3 n = normalize(hit.normal);
+		if (dot(n, d) > 0)
+			n = -n;
+		float3 p = o + hit.t * d + n * EPSILON;
+		float3 albedo = obj.color.xyz;
+		float3 local = albedo * f.ambient.xyz;
+		for (int i = 0; i < f.nlights; i++)
+		{
+			float3 tolight = lights[i].position.xyz - p;
+			float dist = length(tolight);
+			float3 l = tolight / dist;
+			float ndl = dot(n, l);
+			if (ndl <= 0 || occluded(p, l, dist, objs, f.nobjects))
+				continue ;
+			float3 lc = lights[i].color.xyz;
+			local += albedo * lc * ndl;
+			float ndh = dot(n, normalize(l - d));
+			if (ndh > 0)
+				local += lc * SPECULAR * pow(ndh, SHININESS);
+		}
+		if (obj.reflect > 0 && depth < MAX_DEPTH)
+		{
+			color += weight * (1 - obj.reflect) * local;
+			weight *= obj.reflect;
+			o = p;
+			d = reflect(d, n);
+		}
+		else
+		{
+			color += weight * local;
+			break ;
+		}
+	}
+	return (color);
+}
+
+kernel void		render(texture2d<float, access::write> out [[texture(0)]],
+					constant t_gpu_frame &f [[buffer(0)]],
+					device const t_gpu_object *objs [[buffer(1)]],
+					device const t_gpu_light *lights [[buffer(2)]],
+					uint2 gid [[thread_position_in_grid]])
+{
+	float w = out.get_width();
+	float h = out.get_height();
+
+	if (gid.x >= w || gid.y >= h)
+		return ;
+	float depth = w / (2 * tan(f.fov * M_PI_F / 360));
+	float3 color = float3(0);
+	for (int sy = 0; sy < f.samples; sy++)
+		for (int sx = 0; sx < f.samples; sx++)
+		{
+			float px = gid.x + (sx + 0.5) / f.samples - 0.5;
+			float py = gid.y + (sy + 0.5) / f.samples - 0.5;
+			float3 d = normalize(f.forward.xyz * depth
+				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
+			color += trace(f.origin.xyz, d, f, objs, lights);
+		}
+	color /= f.samples * f.samples;
+	out.write(float4(pow(clamp(color, 0.0, 1.0), 1 / GAMMA), 1), gid);
+}

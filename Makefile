@@ -46,3 +46,30 @@ fclean:
 		rm -f $(NAME)
 
 re: fclean all
+
+# --- Version GPU (Metal, arm64 nativo, sin minilibx) ---
+
+GPU_NAME = rt_gpu
+
+GPU_SRCS = $(SRCS_LIB) $(SRCS_GNL) $(SRCS_LD) $(SRCS_MATHS) $(SRCS_MATRIX) \
+		$(SRCS_VECTOR) $(SRCS_OBJ) generateImage/camera.c \
+		generateImage/intersections.c gpu/scene_export.c gpu/main.m
+
+GPU_FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit \
+		-framework QuartzCore -framework ImageIO -framework CoreGraphics \
+		-framework UniformTypeIdentifiers
+
+# El shader se compila en tiempo de ejecucion: se incrusta como string C
+# con shared.h pegado dentro (newLibraryWithSource no resuelve #include).
+gpu/shader_src.h: gpu/shader.metal gpu/shared.h
+		{ echo 'static const char *g_shader_src ='; \
+		sed -e '/#include "shared.h"/r gpu/shared.h' -e '/#include "shared.h"/d' gpu/shader.metal \
+		| sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; \
+		echo ';'; } > $@
+
+$(GPU_NAME): gpu/shader_src.h $(GPU_SRCS)
+		clang -arch arm64 -O2 -fobjc-arc $(FLAGS) $(GPU_SRCS) $(GPU_FRAMEWORKS) -o $(GPU_NAME)
+
+gpu: $(GPU_NAME)
+
+.PHONY: all fclean re gpu

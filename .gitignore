@@ -1,0 +1,3 @@
+rt_gpu
+gpu/shader_src.h
+*.dSYM
