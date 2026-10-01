@@ -48,6 +48,8 @@ static t_vec4		vec4(simd_float3 v)
 - (void)setFast:(bool)fast;
 - (void)pathAt:(float)t frame:(unsigned int)frame;
 - (double)renderOnce:(id<MTLTexture>)texture;
+- (void)encodeTemporalTo:(id<MTLTexture>)texture scale:(float)scale buffer:(id<MTLCommandBuffer>)cmd;
+- (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w h:(NSUInteger)h usage:(MTLTextureUsage)usage;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
@@ -62,6 +64,14 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLBuffer>				_nodes;
 	id<MTLTexture>				_base;
 	id<MTLFXSpatialScaler>		_scaler;
+	id<MTLFXTemporalScaler>		_temporal;
+	id<MTLTexture>				_tColor;
+	id<MTLTexture>				_tDepth;
+	id<MTLTexture>				_tMotion;
+	id<MTLTexture>				_tOut;
+	t_gpu_frame					_prev;
+	simd_float2					_lastJitter;
+	bool						_hasPrev;
 	id<MTLTexture>				_lowres;
 	int							_nplanes;
 	id<MTLAccelerationStructure>	_accel;
@@ -241,6 +251,20 @@ static t_vec4		vec4(simd_float3 v)
 		atIndex:0];
 	printf("estructura de aceleracion: %d cajas en %.1f ms\n", n,
 		(CACurrentMediaTime() - t0) * 1000);
+}
+
+static float	halton(int i, int b)
+{
+	float	f = 1;
+	float	r = 0;
+
+	while (i > 0)
+	{
+		f /= b;
+		r += f * (i % b);
+		i /= b;
+	}
+	return (r);
 }
 
 /*
@@ -439,8 +463,12 @@ static bool		has_transparency(CGImageRef img)
 
 - (void)pathAt:(float)t frame:(unsigned int)frame
 {
-	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * t;
-	_yaw = _pathYaw + 0.25f * t;
+	if (getenv("RT_STATIC"))
+		t = 0.5f;
+	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
+	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
+	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm;
+	_yaw = _pathYaw + 0.25f * ty;
 	_frame = frame;
 }
 
@@ -503,9 +531,31 @@ static bool		has_transparency(CGImageRef img)
 
 	f.pass = pass;
 	f.spread = 2 * tanf(f.fov * M_PI / 360) / texture.width;
+	/*
+	** Con reescalado, las texturas se muestrean al detalle de la resolucion
+	** final, no al de la de render.
+	*/
+	if (pass == 3)
+		f.spread *= (float)texture.width / _temporal.outputWidth;
 	[enc setComputePipelineState:_pipeline];
 	[enc setTexture:texture atIndex:0];
 	[enc setTexture:base atIndex:1];
+	[enc setTexture:(pass == 3 ? _tDepth : base) atIndex:2];
+	[enc setTexture:(pass == 3 ? _tMotion : base) atIndex:3];
+	if (pass == 3)
+	{
+		f.prev_origin = _hasPrev ? _prev.origin : f.origin;
+		f.prev_forward = _hasPrev ? _prev.forward : f.forward;
+		f.prev_right = _hasPrev ? _prev.right : f.right;
+		f.prev_up = _hasPrev ? _prev.up : f.up;
+		f.jitter = simd_make_float4(halton(_frame % 32 + 1, 2) - 0.5f,
+			halton(_frame % 32 + 1, 3) - 0.5f, 0, 0);
+		float mj = getenv("RT_MVJ") ? atof(getenv("RT_MVJ")) : 0;
+		f.jitter.z = mj * f.jitter.x;
+		f.jitter.w = mj * f.jitter.y;
+		_prev = f;
+		_lastJitter = simd_make_float2(f.jitter.x, f.jitter.y);
+	}
 	[enc setBytes:&f length:sizeof(f) atIndex:0];
 	[enc setBuffer:_objects offset:0 atIndex:1];
 	[enc setBuffer:_lights offset:0 atIndex:2];
@@ -585,6 +635,12 @@ static bool		has_transparency(CGImageRef img)
 {
 	float	scale = getenv("RT_SCALE") ? atof(getenv("RT_SCALE")) : 1;
 
+	if (getenv("RT_TEMPORAL"))
+	{
+		[self encodeTemporalTo:texture scale:(scale < 1 ? scale : 0.5f)
+			buffer:cmd];
+		return ;
+	}
 	if (scale >= 1)
 	{
 		[self encodeTo:texture buffer:cmd];
@@ -612,6 +668,74 @@ static bool		has_transparency(CGImageRef img)
 	_scaler.colorTexture = _lowres;
 	_scaler.outputTexture = texture;
 	[_scaler encodeToCommandBuffer:cmd];
+}
+
+/*
+** Reescalado temporal (como DLSS): render a scale * resolucion con 1 rayo
+** desplazado por pixel; MetalFX acumula las imagenes anteriores usando
+** profundidad y movimiento y reconstruye la resolucion final.
+*/
+
+- (void)encodeTemporalTo:(id<MTLTexture>)texture scale:(float)scale
+	buffer:(id<MTLCommandBuffer>)cmd
+{
+	NSUInteger	iw = (NSUInteger)(texture.width * scale);
+	NSUInteger	ih = (NSUInteger)(texture.height * scale);
+
+	if (!_temporal || _temporal.outputWidth != texture.width)
+	{
+		MTLFXTemporalScalerDescriptor *d = [MTLFXTemporalScalerDescriptor new];
+		d.inputWidth = iw;
+		d.inputHeight = ih;
+		d.outputWidth = texture.width;
+		d.outputHeight = texture.height;
+		d.colorTextureFormat = MTLPixelFormatBGRA8Unorm;
+		d.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
+		d.depthTextureFormat = MTLPixelFormatR32Float;
+		d.motionTextureFormat = MTLPixelFormatRG16Float;
+		_temporal = [d newTemporalScalerWithDevice:_device];
+		_temporal.depthReversed = YES;
+		_temporal.motionVectorScaleX = iw;
+		_temporal.motionVectorScaleY = ih;
+		_tColor = [self privateTexture:MTLPixelFormatBGRA8Unorm w:iw h:ih
+			usage:MTLTextureUsageShaderWrite | _temporal.colorTextureUsage];
+		_tDepth = [self privateTexture:MTLPixelFormatR32Float w:iw h:ih
+			usage:MTLTextureUsageShaderWrite | _temporal.depthTextureUsage];
+		_tMotion = [self privateTexture:MTLPixelFormatRG16Float w:iw h:ih
+			usage:MTLTextureUsageShaderWrite | _temporal.motionTextureUsage];
+		_tOut = [self privateTexture:MTLPixelFormatBGRA8Unorm w:texture.width
+			h:texture.height usage:_temporal.outputTextureUsage];
+		_hasPrev = false;
+	}
+	[self encodePass:3 to:_tColor base:_tColor buffer:cmd];
+	_temporal.colorTexture = _tColor;
+	_temporal.inputContentWidth = _tColor.width;
+	_temporal.inputContentHeight = _tColor.height;
+	_temporal.depthTexture = _tDepth;
+	_temporal.motionTexture = _tMotion;
+	_temporal.outputTexture = _tOut;
+	float js = getenv("RT_JS") ? atof(getenv("RT_JS")) : -1;
+	_temporal.jitterOffsetX = js * _lastJitter.x;
+	_temporal.jitterOffsetY = js * _lastJitter.y;
+	float ms = getenv("RT_MS") ? atof(getenv("RT_MS")) : 1;
+	_temporal.motionVectorScaleX = ms * _tColor.width;
+	_temporal.motionVectorScaleY = ms * _tColor.height;
+	_temporal.reset = !_hasPrev;
+	[_temporal encodeToCommandBuffer:cmd];
+	_hasPrev = true;
+	id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+	[blit copyFromTexture:_tOut toTexture:texture];
+	[blit endEncoding];
+}
+
+- (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w
+	h:(NSUInteger)h usage:(MTLTextureUsage)usage
+{
+	MTLTextureDescriptor *td = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
+	td.usage = usage;
+	td.storageMode = MTLStorageModePrivate;
+	return ([_device newTextureWithDescriptor:td]);
 }
 
 - (double)renderOnce:(id<MTLTexture>)texture

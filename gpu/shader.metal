@@ -498,9 +498,10 @@ static float	ambient_occlusion(float3 p, float3 n, uint seed,
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights,
-					ACCEL_DECL, uint seed)
+					ACCEL_DECL, uint seed, thread float &first_t)
 {
 	float3 color = float3(0);
+	first_t = NOHIT;
 	float3 weight = float3(1);
 	float cone = 0;
 
@@ -520,6 +521,8 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 		float spec;
 		float3 p = o + hit.t * d;
 		cone += hit.t;
+		if (depth == 0)
+			first_t = hit.t;
 #ifdef HW_RT
 		if (hit.mesh)
 		{
@@ -624,6 +627,8 @@ static float	channel_diff(float4 a, float4 b)
 
 kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					texture2d<float, access::read> base [[texture(1)]],
+					texture2d<float, access::write> depth_out [[texture(2)]],
+					texture2d<float, access::write> motion_out [[texture(3)]],
 					constant t_gpu_frame &f [[buffer(0)]],
 					device const t_gpu_object *objs [[buffer(1)]],
 					device const t_gpu_light *lights [[buffer(2)]],
@@ -645,6 +650,35 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 
 	if (gid.x >= w || gid.y >= h)
 		return ;
+	if (f.pass == 3)
+	{
+		/*
+		** Entrada del reescalado temporal (MetalFX): 1 rayo desplazado por
+		** el jitter de esta imagen, mas la profundidad (Z invertida) y el
+		** vector de movimiento: donde estaba este punto en la imagen anterior.
+		*/
+		float depth = w / (2 * tan(f.fov * M_PI_F / 360));
+		float px = gid.x + f.jitter.x;
+		float py = gid.y + f.jitter.y;
+		float3 d = normalize(f.forward.xyz * depth
+			+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
+		float first_t;
+		float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
+			hash(gid.x * 1973 + gid.y * 9277 + f.frame * 104729), first_t);
+		c = f.ntris > 0 ? tonemap(c * EXPOSURE) : c;
+		out.write(float4(pow(clamp(c, 0.0, 1.0), 1 / GAMMA), 1), gid);
+		float3 world = f.origin.xyz + d * min(first_t, 1e5f);
+		float3 v = world - f.prev_origin.xyz;
+		float z = dot(v, f.prev_forward.xyz);
+		float2 prev = float2(dot(v, f.prev_right.xyz), -dot(v, f.prev_up.xyz))
+			* (depth / max(z, 1e-4f)) + float2(w / 2, h / 2);
+		float2 motion = z > 1e-4f ? prev - float2(px, py) + f.jitter.zw
+			: float2(0);
+		motion_out.write(float4(motion / float2(w, h), 0, 0), gid);
+		depth_out.write(float4(first_t < NOHIT ? clamp(0.05f / first_t, 0.0f,
+			1.0f) : 0.0f), gid);
+		return ;
+	}
 	if (f.pass == 2)
 	{
 		float4 c = base.read(gid);
@@ -679,9 +713,10 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float py = gid.y + (sy + 0.5) / samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
+			float first_t;
 			float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
 				hash(gid.x * 1973 + gid.y * 9277 + (sy * samples + sx) * 26699
-				+ f.frame * 104729));
+				+ f.frame * 104729), first_t);
 			color += f.ntris > 0 ? tonemap(c * EXPOSURE) : c;
 		}
 	color /= samples * samples;

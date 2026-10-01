@@ -103,6 +103,11 @@ typedef struct	s_gpu_frame
 	int			pad;
 	t_vec4		scene_min;
 	t_vec4		scene_max;
+	t_vec4		prev_origin;
+	t_vec4		prev_forward;
+	t_vec4		prev_right;
+	t_vec4		prev_up;
+	t_vec4		jitter;
 }				t_gpu_frame;
 
 #endif
