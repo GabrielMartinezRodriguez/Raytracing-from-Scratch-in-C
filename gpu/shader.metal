@@ -49,6 +49,11 @@ constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
+constant int	GI_BOUNCES = 2;
+constant float	CLIP_NEAR = 0.05f;
+constant float	CLIP_FAR = 1000.0f;
+constant float	SKY_LIGHT = 2.0;
+constant float	GI_EXPOSURE = 2.2;
 constant float	AO_RADIUS = 1.5;
 constant float	EDGE = 0.1;
 constant float	SHADOW_MIN_WEIGHT = 0.25;
@@ -495,6 +500,113 @@ static float	ambient_occlusion(float3 p, float3 n, uint seed,
 	return ((float)open / f.ao_rays);
 }
 
+struct			Surf
+{
+	float3		p;
+	float3		n;
+	float3		ng;
+	float3		albedo;
+	float		refl;
+	float		spec;
+};
+
+/*
+** Datos de la superficie tocada: punto (ya desplazado para no chocar
+** consigo mismo), normal de sombreado, normal geometrica y material.
+*/
+
+static Surf		surface(Hit hit, float3 o, float3 d, float cone,
+					constant t_gpu_frame &f, device const t_gpu_object *objs,
+					ACCEL_DECL)
+{
+	Surf	s;
+
+	s.p = o + hit.t * d;
+#ifdef HW_RT
+	if (hit.mesh)
+	{
+		device const t_gpu_tri &t = tris[hit.id];
+		float3 p0 = mesh_pos[hit.id * 3];
+		float3 p1 = mesh_pos[hit.id * 3 + 1];
+		float3 p2 = mesh_pos[hit.id * 3 + 2];
+		float3 cr = cross(p1 - p0, p2 - p0);
+		s.ng = normalize(cr);
+		if (dot(s.ng, d) > 0)
+			s.ng = -s.ng;
+		float2 b = hit.bary;
+		float3 ns = unpack_normal(t.n[0]) * (1 - b.x - b.y)
+			+ unpack_normal(t.n[1]) * b.x + unpack_normal(t.n[2]) * b.y;
+		s.n = length_squared(ns) > 1e-4f ? normalize(ns) : s.ng;
+		if (dot(s.n, s.ng) < 0)
+			s.n = -s.n;
+		device const GpuMaterial &m = mats[t.material];
+		s.albedo = m.kd.rgb;
+		if (m.flags & MAT_TEXTURE)
+		{
+			/*
+			** Nivel de mipmap por "cono de rayo": cuanto mas lejos y mas
+			** de canto, mas grande es la huella del pixel en la textura.
+			*/
+			float2 e1 = float2(t.uv[2] - t.uv[0], t.uv[3] - t.uv[1]);
+			float2 e2 = float2(t.uv[4] - t.uv[0], t.uv[5] - t.uv[1]);
+			float uv_area = fabs(e1.x * e2.y - e2.x * e1.y)
+				* m.diffuse.get_width() * m.diffuse.get_height();
+			float lod = 0.5f * log2(uv_area / max(length(cr), 1e-12f))
+				+ log2(cone * f.spread / max(fabs(dot(s.ng, d)), 0.1f));
+			s.albedo *= m.diffuse.sample(tex_sampler, tri_uv(t, b),
+				level(max(lod, 0.0f))).rgb;
+		}
+		s.refl = 0;
+		s.spec = MESH_SPECULAR;
+	}
+	else
+#endif
+	{
+		device const t_gpu_object &obj = objs[hit.id];
+		s.n = normalize(hit.normal);
+		if (dot(s.n, d) > 0)
+			s.n = -s.n;
+		s.ng = s.n;
+		s.albedo = obj.color.xyz;
+		s.refl = obj.reflect;
+		s.spec = SPECULAR;
+	}
+	/*
+	** El error de coma flotante crece con la distancia al origen: un
+	** desplazamiento fijo deja "acne" (puntos negros) en escenas grandes.
+	*/
+	s.p += s.ng * EPSILON * max(1.0f, length(s.p) * 0.1f);
+	return (s);
+}
+
+/*
+** Luz directa de las lamparas (difusa + brillo), con sombras si se piden.
+*/
+
+static float3	direct_light(Surf s, float3 d, bool shadows,
+					constant t_gpu_frame &f, device const t_gpu_object *objs,
+					device const t_gpu_light *lights, ACCEL_DECL)
+{
+	float3	local = float3(0);
+
+	for (int i = 0; i < f.nlights; i++)
+	{
+		float3 tolight = lights[i].position.xyz - s.p;
+		float dist = length(tolight);
+		float3 l = tolight / dist;
+		float ndl = dot(s.n, l);
+		if (ndl <= 0 || (shadows
+			&& intersect(s.p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0))
+			continue ;
+		float3 lc = lights[i].color.xyz;
+		local += s.albedo * lc * ndl;
+		float ndh = dot(s.n, normalize(l - d));
+		if (ndh > 0)
+			local += lc * s.spec * pow(ndh, SHININESS);
+	}
+	return (local);
+}
+
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights,
@@ -514,99 +626,88 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 				color += weight * sky(d);
 			break ;
 		}
-		float3 n;
-		float3 ng;
-		float3 albedo;
-		float refl;
-		float spec;
-		float3 p = o + hit.t * d;
 		cone += hit.t;
 		if (depth == 0)
 			first_t = hit.t;
-#ifdef HW_RT
-		if (hit.mesh)
-		{
-			device const t_gpu_tri &t = tris[hit.id];
-			float3 p0 = mesh_pos[hit.id * 3];
-			float3 p1 = mesh_pos[hit.id * 3 + 1];
-			float3 p2 = mesh_pos[hit.id * 3 + 2];
-			float3 cr = cross(p1 - p0, p2 - p0);
-			ng = normalize(cr);
-			if (dot(ng, d) > 0)
-				ng = -ng;
-			float2 b = hit.bary;
-			float3 ns = unpack_normal(t.n[0]) * (1 - b.x - b.y)
-				+ unpack_normal(t.n[1]) * b.x + unpack_normal(t.n[2]) * b.y;
-			n = length_squared(ns) > 1e-4f ? normalize(ns) : ng;
-			if (dot(n, ng) < 0)
-				n = -n;
-			device const GpuMaterial &m = mats[t.material];
-			albedo = m.kd.rgb;
-			if (m.flags & MAT_TEXTURE)
-			{
-				/*
-				** Nivel de mipmap por "cono de rayo": cuanto mas lejos y mas
-				** de canto, mas grande es la huella del pixel en la textura.
-				*/
-				float2 e1 = float2(t.uv[2] - t.uv[0], t.uv[3] - t.uv[1]);
-				float2 e2 = float2(t.uv[4] - t.uv[0], t.uv[5] - t.uv[1]);
-				float uv_area = fabs(e1.x * e2.y - e2.x * e1.y)
-					* m.diffuse.get_width() * m.diffuse.get_height();
-				float lod = 0.5f * log2(uv_area / max(length(cr), 1e-12f))
-					+ log2(cone * f.spread / max(fabs(dot(ng, d)), 0.1f));
-				albedo *= m.diffuse.sample(tex_sampler, tri_uv(t, b),
-					level(max(lod, 0.0f))).rgb;
-			}
-			refl = 0;
-			spec = MESH_SPECULAR;
-		}
-		else
-#endif
-		{
-			device const t_gpu_object &obj = objs[hit.id];
-			n = normalize(hit.normal);
-			if (dot(n, d) > 0)
-				n = -n;
-			ng = n;
-			albedo = obj.color.xyz;
-			refl = obj.reflect;
-			spec = SPECULAR;
-		}
-		/*
-		** El error de coma flotante crece con la distancia al origen: un
-		** desplazamiento fijo deja "acne" (puntos negros) en escenas grandes.
-		*/
-		p += ng * EPSILON * max(1.0f, length(p) * 0.1f);
-		float3 local = albedo * f.ambient.xyz;
+		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS);
+		float3 local = s.albedo * f.ambient.xyz;
 		if (f.ntris > 0 && depth == 0)
-			local *= ambient_occlusion(p, n, seed, f, objs, ACCEL_ARGS);
+			local *= ambient_occlusion(s.p, s.n, seed, f, objs, ACCEL_ARGS);
 		bool shadows = max3(weight.x, weight.y, weight.z) >= SHADOW_MIN_WEIGHT;
-		for (int i = 0; i < f.nlights; i++)
+		local += direct_light(s, d, shadows, f, objs, lights, ACCEL_ARGS);
+		if (s.refl > 0 && depth < MAX_DEPTH)
 		{
-			float3 tolight = lights[i].position.xyz - p;
-			float dist = length(tolight);
-			float3 l = tolight / dist;
-			float ndl = dot(n, l);
-			if (ndl <= 0 || (shadows && intersect(p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0))
-				continue ;
-			float3 lc = lights[i].color.xyz;
-			local += albedo * lc * ndl;
-			float ndh = dot(n, normalize(l - d));
-			if (ndh > 0)
-				local += lc * spec * pow(ndh, SHININESS);
-		}
-		if (refl > 0 && depth < MAX_DEPTH)
-		{
-			color += weight * (1 - refl) * local;
-			weight *= refl;
-			o = p;
-			d = reflect(d, n);
+			color += weight * (1 - s.refl) * local;
+			weight *= s.refl;
+			o = s.p;
+			d = reflect(d, s.n);
 		}
 		else
 		{
 			color += weight * local;
 			break ;
 		}
+	}
+	return (color);
+}
+
+static float3	cosine_dir(float3 n, uint seed)
+{
+	float3	t = normalize(fabs(n.x) > 0.5f ? cross(n, float3(0, 1, 0))
+		: cross(n, float3(1, 0, 0)));
+	float3	b = cross(n, t);
+	float	u = (hash(seed) & 0xffffff) / 16777216.0f;
+	float	v = (hash(seed * 31 + 17) & 0xffffff) / 16777216.0f;
+	float	r = sqrt(v);
+	float	phi = 2 * M_PI_F * u;
+
+	return (t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(1 - v));
+}
+
+/*
+** Iluminacion global: luz directa del sol + GI_BOUNCES rebotes difusos
+** (direccion aleatoria con distribucion coseno). Cada rebote ve cielo o
+** una superficie iluminada por el sol. Devuelve ademas los datos que pide
+** el denoiser: color de la superficie, normal y distancia del primer impacto.
+*/
+
+static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
+					device const t_gpu_object *objs,
+					device const t_gpu_light *lights, ACCEL_DECL, uint seed,
+					thread float &first_t, thread float3 &first_albedo,
+					thread float3 &first_normal)
+{
+	float3	color = float3(0);
+	float3	weight = float3(1);
+	float	cone = 0;
+
+	first_t = NOHIT;
+	first_albedo = float3(1);
+	first_normal = float3(0, 0, 1);
+	for (int depth = 0; depth <= GI_BOUNCES; depth++)
+	{
+		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
+		if (hit.id < 0)
+		{
+			color += weight * sky(d) * (depth == 0 ? 1.0f : SKY_LIGHT);
+			break ;
+		}
+		cone += hit.t;
+		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS);
+		if (depth == 0)
+		{
+			first_t = hit.t;
+			first_albedo = s.albedo;
+			first_normal = s.n;
+		}
+		color += weight * direct_light(s, d, true, f, objs, lights, ACCEL_ARGS);
+		if (depth == GI_BOUNCES)
+			break ;
+		weight *= s.albedo;
+		o = s.p;
+		d = cosine_dir(s.n, seed + depth * 7919);
+		if (dot(d, s.ng) <= 0)
+			break ;
 	}
 	return (color);
 }
@@ -629,6 +730,10 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					texture2d<float, access::read> base [[texture(1)]],
 					texture2d<float, access::write> depth_out [[texture(2)]],
 					texture2d<float, access::write> motion_out [[texture(3)]],
+					texture2d<float, access::write> albedo_out [[texture(4)]],
+					texture2d<float, access::write> normal_out [[texture(5)]],
+					texture2d<float, access::write> rough_out [[texture(6)]],
+					texture2d<float, access::write> spec_out [[texture(7)]],
 					constant t_gpu_frame &f [[buffer(0)]],
 					device const t_gpu_object *objs [[buffer(1)]],
 					device const t_gpu_light *lights [[buffer(2)]],
@@ -650,6 +755,50 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 
 	if (gid.x >= w || gid.y >= h)
 		return ;
+	if (f.pass == 5)
+	{
+		/*
+		** Salida del denoiser (luz lineal) -> tonemapping + gamma.
+		*/
+		float3 c = tonemap(base.read(gid).rgb);
+		out.write(float4(pow(c, 1 / GAMMA), 1), gid);
+		return ;
+	}
+	if (f.pass == 4)
+	{
+		/*
+		** Iluminacion global para el denoiser de MetalFX: luz lineal con
+		** grano mas las guias (color de superficie, normal, rugosidad,
+		** profundidad de recorte y movimiento).
+		*/
+		float depth = w / (2 * tan(f.fov * M_PI_F / 360));
+		float px = gid.x + f.jitter.x;
+		float py = gid.y + f.jitter.y;
+		float3 d = normalize(f.forward.xyz * depth
+			+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
+		float first_t;
+		float3 alb;
+		float3 nrm;
+		float3 c = trace_gi(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
+			hash(gid.x * 1973 + gid.y * 9277 + f.frame * 104729), first_t,
+			alb, nrm);
+		out.write(float4(c * GI_EXPOSURE, 1), gid);
+		albedo_out.write(float4(alb, 1), gid);
+		normal_out.write(float4(nrm, 0), gid);
+		rough_out.write(float4(0.9f), gid);
+		spec_out.write(float4(0.04f, 0.04f, 0.04f, 1), gid);
+		float3 world = f.origin.xyz + d * min(first_t, 1e5f);
+		float3 v = world - f.prev_origin.xyz;
+		float z = dot(v, f.prev_forward.xyz);
+		float2 prev = float2(dot(v, f.prev_right.xyz), -dot(v, f.prev_up.xyz))
+			* (depth / max(z, 1e-4f)) + float2(w / 2, h / 2);
+		float2 motion = z > 1e-4f ? prev - float2(px, py) : float2(0);
+		motion_out.write(float4(motion / float2(w, h), 0, 0), gid);
+		float vz = min(first_t, 1e5f) * dot(d, f.forward.xyz);
+		depth_out.write(float4(first_t < NOHIT ? clamp(CLIP_FAR * (vz - CLIP_NEAR)
+			/ ((CLIP_FAR - CLIP_NEAR) * vz), 0.0f, 1.0f) : 1.0f), gid);
+		return ;
+	}
 	if (f.pass == 3)
 	{
 		/*

@@ -23,7 +23,7 @@
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
 	KEY_1 = 18, KEY_2 = 19, KEY_3 = 20, KEY_4 = 21, KEY_ESC = 53,
-	KEY_LEFT = 123, KEY_RIGHT = 124, KEY_T = 17 };
+	KEY_LEFT = 123, KEY_RIGHT = 124, KEY_T = 17, KEY_G = 5 };
 
 static simd_float3	xyz(t_vec4 v)
 {
@@ -39,6 +39,7 @@ static t_vec4		vec4(simd_float3 v)
 @property (nonatomic) int samples;
 @property (nonatomic) float moveSpeed;
 @property (nonatomic) bool temporalOn;
+@property (nonatomic) bool giOn;
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
@@ -52,6 +53,9 @@ static t_vec4		vec4(simd_float3 v)
 - (double)renderOnce:(id<MTLTexture>)texture;
 - (void)encodeTemporalTo:(id<MTLTexture>)texture scale:(float)scale buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w h:(NSUInteger)h usage:(MTLTextureUsage)usage;
+- (void)encodeGITo:(id<MTLTexture>)texture scale:(float)scale buffer:(id<MTLCommandBuffer>)cmd;
+- (void)cameraMatrices:(simd_float4x4 *)view proj:(simd_float4x4 *)proj aspect:(float)aspect;
+- (t_gpu_frame)frame;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
@@ -67,6 +71,15 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLTexture>				_base;
 	id<MTLFXSpatialScaler>		_scaler;
 	id<MTLFXTemporalScaler>		_temporal;
+	id<MTLFXTemporalDenoisedScaler>	_denoiser;
+	id<MTLTexture>				_gColor;
+	id<MTLTexture>				_gDepth;
+	id<MTLTexture>				_gMotion;
+	id<MTLTexture>				_gAlbedo;
+	id<MTLTexture>				_gNormal;
+	id<MTLTexture>				_gRough;
+	id<MTLTexture>				_gSpec;
+	id<MTLTexture>				_gOut;
 	id<MTLTexture>				_tColor;
 	id<MTLTexture>				_tDepth;
 	id<MTLTexture>				_tMotion;
@@ -537,12 +550,19 @@ static bool		has_transparency(CGImageRef img)
 	*/
 	if (pass == 3)
 		f.spread *= (float)texture.width / _temporal.outputWidth;
+	if (pass == 4)
+		f.spread *= (float)texture.width / _denoiser.outputWidth;
 	[enc setComputePipelineState:_pipeline];
 	[enc setTexture:texture atIndex:0];
 	[enc setTexture:base atIndex:1];
-	[enc setTexture:(pass == 3 ? _tDepth : base) atIndex:2];
-	[enc setTexture:(pass == 3 ? _tMotion : base) atIndex:3];
-	if (pass == 3)
+	bool gi = (pass == 4);
+	[enc setTexture:(pass == 3 ? _tDepth : gi ? _gDepth : base) atIndex:2];
+	[enc setTexture:(pass == 3 ? _tMotion : gi ? _gMotion : base) atIndex:3];
+	[enc setTexture:(gi ? _gAlbedo : base) atIndex:4];
+	[enc setTexture:(gi ? _gNormal : base) atIndex:5];
+	[enc setTexture:(gi ? _gRough : base) atIndex:6];
+	[enc setTexture:(gi ? _gSpec : base) atIndex:7];
+	if (pass == 3 || pass == 4)
 	{
 		f.prev_origin = _hasPrev ? _prev.origin : f.origin;
 		f.prev_forward = _hasPrev ? _prev.forward : f.forward;
@@ -635,6 +655,11 @@ static bool		has_transparency(CGImageRef img)
 {
 	float	scale = getenv("RT_SCALE") ? atof(getenv("RT_SCALE")) : 1;
 
+	if (_giOn || getenv("RT_GI"))
+	{
+		[self encodeGITo:texture scale:(scale < 1 ? scale : 0.5f) buffer:cmd];
+		return ;
+	}
 	if (_temporalOn || getenv("RT_TEMPORAL"))
 	{
 		[self encodeTemporalTo:texture scale:(scale < 1 ? scale : 0.5f)
@@ -728,6 +753,111 @@ static bool		has_transparency(CGImageRef img)
 	[blit endEncoding];
 }
 
+/*
+** Matrices de camara que pide el denoiser: mundo -> vista (la camara mira
+** hacia -Z) y vista -> recorte (perspectiva con profundidad 0..1, la misma
+** que escribe el kernel en la textura de profundidad).
+*/
+
+- (void)cameraMatrices:(simd_float4x4 *)view proj:(simd_float4x4 *)proj
+	aspect:(float)aspect
+{
+	t_gpu_frame	f = [self frame];
+	simd_float3	r = xyz(f.right);
+	simd_float3	u = xyz(f.up);
+	simd_float3	b = -xyz(f.forward);
+	simd_float3	o = xyz(f.origin);
+	float		n = 0.05f;
+	float		fa = 1000.0f;
+	float		xs = 1 / tanf(f.fov * M_PI / 360);
+	float		ys = xs * aspect;
+
+	*view = (simd_float4x4){{
+		{r.x, u.x, b.x, 0}, {r.y, u.y, b.y, 0}, {r.z, u.z, b.z, 0},
+		{-simd_dot(r, o), -simd_dot(u, o), -simd_dot(b, o), 1}}};
+	*proj = (simd_float4x4){{
+		{xs, 0, 0, 0}, {0, ys, 0, 0}, {0, 0, fa / (n - fa), -1},
+		{0, 0, n * fa / (n - fa), 0}}};
+}
+
+/*
+** Iluminacion global con el denoiser temporal de MetalFX: render con grano a
+** scale * resolucion, MetalFX limpia y reescala, y un ultimo paso aplica el
+** tonemapping.
+*/
+
+- (void)encodeGITo:(id<MTLTexture>)texture scale:(float)scale
+	buffer:(id<MTLCommandBuffer>)cmd
+{
+	NSUInteger	iw = (NSUInteger)(texture.width * scale);
+	NSUInteger	ih = (NSUInteger)(texture.height * scale);
+
+	if (!_denoiser || _denoiser.outputWidth != texture.width)
+	{
+		MTLFXTemporalDenoisedScalerDescriptor *d =
+			[MTLFXTemporalDenoisedScalerDescriptor new];
+		d.inputWidth = iw;
+		d.inputHeight = ih;
+		d.outputWidth = texture.width;
+		d.outputHeight = texture.height;
+		d.colorTextureFormat = MTLPixelFormatRGBA16Float;
+		d.depthTextureFormat = MTLPixelFormatR32Float;
+		d.motionTextureFormat = MTLPixelFormatRG16Float;
+		d.diffuseAlbedoTextureFormat = MTLPixelFormatRGBA16Float;
+		d.specularAlbedoTextureFormat = MTLPixelFormatRGBA16Float;
+		d.normalTextureFormat = MTLPixelFormatRGBA16Float;
+		d.roughnessTextureFormat = MTLPixelFormatR16Float;
+		d.outputTextureFormat = MTLPixelFormatRGBA16Float;
+		_denoiser = [d newTemporalDenoisedScalerWithDevice:_device];
+		if (!_denoiser)
+		{
+			fprintf(stderr, "error: no se pudo crear el denoiser de MetalFX\n");
+			exit(1);
+		}
+		MTLTextureUsage w = MTLTextureUsageShaderWrite;
+		_gColor = [self privateTexture:MTLPixelFormatRGBA16Float w:iw h:ih
+			usage:w | _denoiser.colorTextureUsage];
+		_gDepth = [self privateTexture:MTLPixelFormatR32Float w:iw h:ih
+			usage:w | _denoiser.depthTextureUsage];
+		_gMotion = [self privateTexture:MTLPixelFormatRG16Float w:iw h:ih
+			usage:w | _denoiser.motionTextureUsage];
+		_gAlbedo = [self privateTexture:MTLPixelFormatRGBA16Float w:iw h:ih
+			usage:w | _denoiser.diffuseAlbedoTextureUsage];
+		_gSpec = [self privateTexture:MTLPixelFormatRGBA16Float w:iw h:ih
+			usage:w | _denoiser.specularAlbedoTextureUsage];
+		_gNormal = [self privateTexture:MTLPixelFormatRGBA16Float w:iw h:ih
+			usage:w | _denoiser.normalTextureUsage];
+		_gRough = [self privateTexture:MTLPixelFormatR16Float w:iw h:ih
+			usage:w | _denoiser.roughnessTextureUsage];
+		_gOut = [self privateTexture:MTLPixelFormatRGBA16Float
+			w:texture.width h:texture.height
+			usage:_denoiser.outputTextureUsage | MTLTextureUsageShaderRead];
+		_hasPrev = false;
+	}
+	[self encodePass:4 to:_gColor base:_gColor buffer:cmd];
+	simd_float4x4 view;
+	simd_float4x4 proj;
+	[self cameraMatrices:&view proj:&proj aspect:(float)iw / ih];
+	_denoiser.colorTexture = _gColor;
+	_denoiser.depthTexture = _gDepth;
+	_denoiser.motionTexture = _gMotion;
+	_denoiser.diffuseAlbedoTexture = _gAlbedo;
+	_denoiser.specularAlbedoTexture = _gSpec;
+	_denoiser.normalTexture = _gNormal;
+	_denoiser.roughnessTexture = _gRough;
+	_denoiser.outputTexture = _gOut;
+	_denoiser.jitterOffsetX = -_lastJitter.x;
+	_denoiser.jitterOffsetY = -_lastJitter.y;
+	_denoiser.motionVectorScaleX = iw;
+	_denoiser.motionVectorScaleY = ih;
+	_denoiser.worldToViewMatrix = view;
+	_denoiser.viewToClipMatrix = proj;
+	_denoiser.shouldResetHistory = !_hasPrev;
+	[_denoiser encodeToCommandBuffer:cmd];
+	_hasPrev = true;
+	[self encodePass:5 to:texture base:_gOut buffer:cmd];
+}
+
 - (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w
 	h:(NSUInteger)h usage:(MTLTextureUsage)usage
 {
@@ -758,6 +888,8 @@ static bool		has_transparency(CGImageRef img)
 		_samples = key - KEY_1 + 1;
 	if (key == KEY_T)
 		_temporalOn = !_temporalOn;
+	if (key == KEY_G)
+		_giOn = !_giOn;
 	if (key == KEY_RIGHT && _camera + 1 < _scene->ncameras)
 		[self useCamera:_camera + 1];
 	if (key == KEY_LEFT && _camera > 0)
