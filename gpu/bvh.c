@@ -222,3 +222,15 @@ t_gpu_node		*build_bvh(t_gpu_scene *scene, int *nnodes, int *nplanes)
 	free(s.centers);
 	return (s.nodes);
 }
+
+void			object_bounds(t_gpu_object *o, float *min, float *max)
+{
+	t_box b = object_box(o);
+
+	min[0] = b.min.x;
+	min[1] = b.min.y;
+	min[2] = b.min.z;
+	max[0] = b.max.x;
+	max[1] = b.max.y;
+	max[2] = b.max.z;
+}

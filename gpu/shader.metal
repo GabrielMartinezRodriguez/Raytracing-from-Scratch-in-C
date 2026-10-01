@@ -1,5 +1,14 @@
 #include <metal_stdlib>
 using namespace metal;
+#ifdef HW_RT
+# include <metal_raytracing>
+using namespace raytracing;
+# define ACCEL_DECL primitive_acceleration_structure accel, intersection_function_table<> table
+# define ACCEL_ARGS accel, table
+#else
+# define ACCEL_DECL device const t_gpu_node *nodes
+# define ACCEL_ARGS nodes
+#endif
 
 #include "shared.h"
 
@@ -15,7 +24,7 @@ constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	TMIN = 1e-3;
-constant float	NOHIT = INFINITY;
+constant float	NOHIT = 1e30f;
 
 struct			Hit
 {
@@ -162,6 +171,73 @@ static float		hit_object(float3 o, float3 d, device const t_gpu_object &obj,
 	}
 }
 
+#ifdef HW_RT
+
+/*
+** Version con las unidades de ray tracing de la GPU: el hardware recorre
+** el arbol de cajas y llama a shape_hit para la interseccion exacta.
+** Los objetos del arbol empiezan despues de los planos (de ahi el offset
+** del buffer en la tabla de funciones).
+*/
+
+struct			BoxResult
+{
+	bool		accept [[accept_intersection]];
+	float		distance [[distance]];
+};
+
+[[intersection(bounding_box)]]
+BoxResult		shape_hit(float3 origin [[origin]],
+					float3 direction [[direction]],
+					float min_distance [[min_distance]],
+					float max_distance [[max_distance]],
+					uint id [[primitive_id]],
+					device const t_gpu_object *objs [[buffer(0)]])
+{
+	float3	normal;
+	float	t = hit_object(origin, direction, objs[id], normal);
+
+	BoxResult result = {t < NOHIT && t >= min_distance && t <= max_distance, t};
+
+	return (result);
+}
+
+static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
+					device const t_gpu_object *objs,
+					ACCEL_DECL, float tmax, bool any)
+{
+	Hit		hit = {tmax, float3(0), -1};
+	float3	normal;
+	float	t;
+
+	for (int i = 0; i < f.nplanes; i++)
+	{
+		t = hit_object(o, d, objs[i], normal);
+		if (t < hit.t)
+		{
+			hit = {t, normal, i};
+			if (any)
+				return (hit);
+		}
+	}
+	if (f.nobjects == f.nplanes)
+		return (hit);
+	intersector<> isect;
+	isect.assume_geometry_type(geometry_type::bounding_box);
+	isect.accept_any_intersection(any);
+	ray r(o, d, 0.0f, hit.t);
+	intersection_result<> res = isect.intersect(r, accel, table);
+	if (res.type == intersection_type::bounding_box)
+	{
+		int i = res.primitive_id + f.nplanes;
+		hit_object(o, d, objs[i], normal);
+		hit = {res.distance, normal, i};
+	}
+	return (hit);
+}
+
+#else
+
 /*
 ** Slab test: distancia de entrada a la caja, o NOHIT si no la toca antes
 ** de tmax.
@@ -188,7 +264,7 @@ static float	hit_box(float3 o, float3 inv, device const t_gpu_node &n,
 
 static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
-					device const t_gpu_node *nodes, float tmax, bool any)
+					ACCEL_DECL, float tmax, bool any)
 {
 	Hit		hit = {tmax, float3(0), -1};
 	float3	normal;
@@ -247,17 +323,19 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 	return (hit);
 }
 
+#endif
+
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights,
-					device const t_gpu_node *nodes)
+					ACCEL_DECL)
 {
 	float3 color = float3(0);
 	float3 weight = float3(1);
 
 	for (int depth = 0; depth <= MAX_DEPTH; depth++)
 	{
-		Hit hit = intersect(o, d, f, objs, nodes, NOHIT, false);
+		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
 			break ;
 		device const t_gpu_object &obj = objs[hit.id];
@@ -273,7 +351,7 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 			float dist = length(tolight);
 			float3 l = tolight / dist;
 			float ndl = dot(n, l);
-			if (ndl <= 0 || intersect(p, l, f, objs, nodes, dist, true).id >= 0)
+			if (ndl <= 0 || intersect(p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0)
 				continue ;
 			float3 lc = lights[i].color.xyz;
 			local += albedo * lc * ndl;
@@ -301,7 +379,12 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					constant t_gpu_frame &f [[buffer(0)]],
 					device const t_gpu_object *objs [[buffer(1)]],
 					device const t_gpu_light *lights [[buffer(2)]],
+#ifdef HW_RT
+					primitive_acceleration_structure accel [[buffer(3)]],
+					intersection_function_table<> table [[buffer(4)]],
+#else
 					device const t_gpu_node *nodes [[buffer(3)]],
+#endif
 					uint2 gid [[thread_position_in_grid]])
 {
 	float w = out.get_width();
@@ -318,7 +401,7 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float py = gid.y + (sy + 0.5) / f.samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
-			color += trace(f.origin.xyz, d, f, objs, lights, nodes);
+			color += trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS);
 		}
 	color /= f.samples * f.samples;
 	out.write(float4(pow(clamp(color, 0.0, 1.0), 1 / GAMMA), 1), gid);

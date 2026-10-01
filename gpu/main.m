@@ -43,6 +43,7 @@ static t_vec4		vec4(simd_float3 v)
 - (void)keyUp:(unsigned short)key;
 - (void)lookBy:(float)dx :(float)dy;
 - (void)setFast:(bool)fast;
+- (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
 @implementation Renderer
@@ -55,6 +56,8 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLBuffer>				_lights;
 	id<MTLBuffer>				_nodes;
 	int							_nplanes;
+	id<MTLAccelerationStructure>	_accel;
+	id<MTLIntersectionFunctionTable>	_table;
 	simd_float3					_position;
 	float						_yaw;
 	float						_pitch;
@@ -62,6 +65,7 @@ static t_vec4		vec4(simd_float3 v)
 	int							_camera;
 	bool						_keys[256];
 	bool						_fast;
+	bool						_hardware;
 	CFTimeInterval				_last;
 	CFTimeInterval				_fpsStart;
 	int							_frames;
@@ -79,7 +83,10 @@ static t_vec4		vec4(simd_float3 v)
 	_device = MTLCreateSystemDefaultDevice();
 	_queue = [_device newCommandQueue];
 	options.mathMode = MTLMathModeFast;
-	library = [_device newLibraryWithSource:@(g_shader_src) options:options
+	_hardware = _device.supportsRaytracing && !(getenv("RT_HW")
+		&& strcmp(getenv("RT_HW"), "0") == 0);
+	library = [_device newLibraryWithSource:[NSString stringWithFormat:@"%s%s",
+		_hardware ? "#define HW_RT 1\n" : "", g_shader_src] options:options
 		error:&error];
 	if (!library)
 	{
@@ -87,8 +94,26 @@ static t_vec4		vec4(simd_float3 v)
 			error.localizedDescription.UTF8String);
 		exit(1);
 	}
-	_pipeline = [_device newComputePipelineStateWithFunction:
-		[library newFunctionWithName:@"render"] error:&error];
+	MTLComputePipelineDescriptor *pdesc = [MTLComputePipelineDescriptor new];
+	pdesc.computeFunction = [library newFunctionWithName:@"render"];
+	id<MTLFunction> shape_fn = nil;
+	if (_hardware)
+	{
+		shape_fn = [library newFunctionWithName:@"shape_hit"];
+		MTLLinkedFunctions *linked = [MTLLinkedFunctions linkedFunctions];
+		linked.functions = @[shape_fn];
+		pdesc.linkedFunctions = linked;
+	}
+	_pipeline = [_device newComputePipelineStateWithDescriptor:pdesc
+		options:0 reflection:nil error:&error];
+	if (!_pipeline)
+	{
+		fprintf(stderr, "error creando el pipeline: %s\n",
+			error.localizedDescription.UTF8String);
+		exit(1);
+	}
+	printf("modo: %s\n", _hardware ? "ray tracing por hardware"
+		: "BVH por software");
 	int nnodes;
 	CFTimeInterval t0 = CACurrentMediaTime();
 	t_gpu_node *nodes = build_bvh(scene, &nnodes, &_nplanes);
@@ -101,11 +126,71 @@ static t_vec4		vec4(simd_float3 v)
 	_objects = [_device newBufferWithBytes:scene->objects
 		length:sizeof(t_gpu_object) * (scene->nobjects + 1)
 		options:MTLResourceStorageModeShared];
+	if (_hardware && scene->nobjects > _nplanes)
+		[self buildAccel:shape_fn];
 	_lights = [_device newBufferWithBytes:scene->lights
 		length:sizeof(t_gpu_light) * (scene->nlights + 1)
 		options:MTLResourceStorageModeShared];
 	[self useCamera:0];
 	return (self);
+}
+
+/*
+** Una caja (AABB) por objeto no plano; la GPU construye su propio arbol
+** sobre ellas y lo recorre con las unidades de ray tracing.
+*/
+
+- (void)buildAccel:(id<MTLFunction>)shape_fn
+{
+	int			n = _scene->nobjects - _nplanes;
+	id<MTLBuffer>	boxes = [_device newBufferWithLength:
+		sizeof(MTLAxisAlignedBoundingBox) * n
+		options:MTLResourceStorageModeShared];
+	MTLAxisAlignedBoundingBox	*b = boxes.contents;
+	CFTimeInterval	t0 = CACurrentMediaTime();
+	float		lo[3];
+	float		hi[3];
+
+	for (int i = 0; i < n; i++)
+	{
+		object_bounds(&_scene->objects[_nplanes + i], lo, hi);
+		b[i].min = MTLPackedFloat3Make(lo[0], lo[1], lo[2]);
+		b[i].max = MTLPackedFloat3Make(hi[0], hi[1], hi[2]);
+	}
+	MTLAccelerationStructureBoundingBoxGeometryDescriptor *geo =
+		[MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+	geo.boundingBoxBuffer = boxes;
+	geo.boundingBoxCount = n;
+	geo.boundingBoxStride = sizeof(MTLAxisAlignedBoundingBox);
+	geo.intersectionFunctionTableOffset = 0;
+	geo.opaque = YES;
+	MTLPrimitiveAccelerationStructureDescriptor *desc =
+		[MTLPrimitiveAccelerationStructureDescriptor descriptor];
+	desc.geometryDescriptors = @[geo];
+	MTLAccelerationStructureSizes sizes =
+		[_device accelerationStructureSizesWithDescriptor:desc];
+	_accel = [_device newAccelerationStructureWithSize:
+		sizes.accelerationStructureSize];
+	id<MTLBuffer> scratch = [_device newBufferWithLength:
+		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	id<MTLAccelerationStructureCommandEncoder> enc =
+		[cmd accelerationStructureCommandEncoder];
+	[enc buildAccelerationStructure:_accel descriptor:desc
+		scratchBuffer:scratch scratchBufferOffset:0];
+	[enc endEncoding];
+	[cmd commit];
+	[cmd waitUntilCompleted];
+	MTLIntersectionFunctionTableDescriptor *tdesc =
+		[MTLIntersectionFunctionTableDescriptor new];
+	tdesc.functionCount = 1;
+	_table = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
+	[_table setFunction:[_pipeline functionHandleWithFunction:shape_fn]
+		atIndex:0];
+	[_table setBuffer:_objects offset:sizeof(t_gpu_object) * _nplanes
+		atIndex:0];
+	printf("estructura de aceleracion: %d cajas en %.1f ms\n", n,
+		(CACurrentMediaTime() - t0) * 1000);
 }
 
 - (void)useCamera:(int)index
@@ -155,18 +240,21 @@ static t_vec4		vec4(simd_float3 v)
 {
 	id<MTLComputeCommandEncoder>	enc = [cmd computeCommandEncoder];
 	t_gpu_frame						f = [self frame];
-	NSUInteger						w = _pipeline.threadExecutionWidth;
-	NSUInteger						h;
-
-	h = _pipeline.maxTotalThreadsPerThreadgroup / w;
 	[enc setComputePipelineState:_pipeline];
 	[enc setTexture:texture atIndex:0];
 	[enc setBytes:&f length:sizeof(f) atIndex:0];
 	[enc setBuffer:_objects offset:0 atIndex:1];
 	[enc setBuffer:_lights offset:0 atIndex:2];
-	[enc setBuffer:_nodes offset:0 atIndex:3];
+	if (_accel)
+	{
+		[enc setAccelerationStructure:_accel atBufferIndex:3];
+		[enc setIntersectionFunctionTable:_table atBufferIndex:4];
+		[enc useResource:_accel usage:MTLResourceUsageRead];
+	}
+	else
+		[enc setBuffer:_nodes offset:0 atIndex:3];
 	[enc dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
-		threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+		threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
 }
 

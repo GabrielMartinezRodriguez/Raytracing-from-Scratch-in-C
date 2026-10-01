@@ -9,4 +9,6 @@
 
 t_gpu_node		*build_bvh(t_gpu_scene *scene, int *nnodes, int *nplanes);
 
+void			object_bounds(t_gpu_object *o, float *min, float *max);
+
 #endif
