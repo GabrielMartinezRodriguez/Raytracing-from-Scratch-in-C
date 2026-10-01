@@ -73,6 +73,7 @@ static t_vec4		vec4(simd_float3 v)
 	CFTimeInterval				_last;
 	CFTimeInterval				_fpsStart;
 	int							_frames;
+	double						_gpuMs;
 }
 
 - (instancetype)initWithScene:(t_gpu_scene *)scene
@@ -415,12 +416,16 @@ static t_vec4		vec4(simd_float3 v)
 	cmd = [_queue commandBuffer];
 	[self encodeTo:drawable.texture buffer:cmd];
 	[cmd presentDrawable:drawable];
+	[cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
+		self->_gpuMs = (done.GPUEndTime - done.GPUStartTime) * 1000;
+	}];
 	[cmd commit];
 	if (++_frames, now - _fpsStart >= 0.5)
 	{
 		view.window.title = [NSString stringWithFormat:
-			@"raytracing majestuoso (GPU) - %.0f fps - %dx%d - AA %dx%d",
-			_frames / (now - _fpsStart), (int)drawable.texture.width,
+			@"raytracing majestuoso (GPU) - %.0f fps"
+			" - GPU %.2f ms/frame - %dx%d - AA %dx%d",
+			_frames / (now - _fpsStart), _gpuMs, (int)drawable.texture.width,
 			(int)drawable.texture.height, _samples, _samples];
 		_frames = 0;
 		_fpsStart = now;
@@ -533,7 +538,7 @@ static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 	NSWindow		*window;
 	RTView			*view;
 
-	renderer.samples = 2;
+	renderer.samples = getenv("RT_AA") ? atoi(getenv("RT_AA")) : 2;
 	[app setActivationPolicy:NSApplicationActivationPolicyRegular];
 	window = [[NSWindow alloc] initWithContentRect:rect
 		styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
