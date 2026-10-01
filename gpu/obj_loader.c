@@ -180,12 +180,17 @@ static t_mesh_material	*new_material(t_gpu_mesh *mesh, const char *name)
 	memset(m, 0, sizeof(*m));
 	snprintf(m->name, sizeof(m->name), "%s", name);
 	m->kd = simd_make_float4(0.8f, 0.8f, 0.8f, 0);
+	m->roughness = 0.9f;
+	m->metallic = 0;
 	return (m);
 }
 
 /*
 ** Las rutas del .mtl de San Miguel vienen con barras de Windows.
 */
+
+static void			map_path(const char *p, const char *end, const char *dir,
+						char *out, size_t len);
 
 static void			load_mtl(t_gpu_mesh *mesh, const char *path, const char *dir)
 {
@@ -219,15 +224,57 @@ static void			load_mtl(t_gpu_mesh *mesh, const char *path, const char *dir)
 			m->kd = simd_make_float4(r, g, b, 0);
 		}
 		else if (m && end - p > 7 && strncmp(p, "map_Kd", 6) == 0)
+			map_path(p + 6, end, dir, m->texture, sizeof(m->texture));
+		else if (m && end - p > 7 && (strncmp(p, "map_Bump", 8) == 0
+			|| strncmp(p, "map_bump", 8) == 0 || strncmp(p, "norm ", 5) == 0))
+			map_path(p + (p[0] == 'n' ? 4 : 8), end, dir, m->normal_map,
+				sizeof(m->normal_map));
+		else if (m && end - p > 7 && strncmp(p, "map_Pr", 6) == 0)
+			map_path(p + 6, end, dir, m->rough_map, sizeof(m->rough_map));
+		else if (m && end - p > 7 && strncmp(p, "map_Pm", 6) == 0)
+			map_path(p + 6, end, dir, m->metal_map, sizeof(m->metal_map));
+		else if (m && end - p > 3 && p[0] == 'P' && p[1] == 'r' && p[2] == ' ')
 		{
-			read_name(p + 6, end, file, sizeof(file));
-			for (char *c = file; *c; c++)
-				if (*c == '\\')
-					*c = '/';
-			snprintf(m->texture, sizeof(m->texture), "%s/%s", dir, file);
+			const char *q = p + 2;
+			m->roughness = parse_float(&q, end);
+		}
+		else if (m && end - p > 3 && p[0] == 'P' && p[1] == 'm' && p[2] == ' ')
+		{
+			const char *q = p + 2;
+			m->metallic = parse_float(&q, end);
 		}
 	}
 	munmap((void *)data, size);
+}
+
+/*
+** Ruta de un mapa del .mtl: salta opciones como "-bm 1.0" y convierte las
+** barras de Windows.
+*/
+
+static void			map_path(const char *p, const char *end, const char *dir,
+						char *out, size_t len)
+{
+	char	file[1024];
+	char	*name = file;
+
+	read_name(p, end, file, sizeof(file));
+	while (*name == '-')
+	{
+		while (*name && *name != ' ')
+			name++;
+		while (*name == ' ')
+			name++;
+		while (*name && *name != ' ' && (*name == '.' || *name == '-'
+			|| (*name >= '0' && *name <= '9')))
+			name++;
+		while (*name == ' ')
+			name++;
+	}
+	for (char *c = name; *c; c++)
+		if (*c == '\\')
+			*c = '/';
+	snprintf(out, len, "%s/%s", dir, name);
 }
 
 static unsigned int	find_material(t_gpu_mesh *mesh, const char *name)
@@ -408,7 +455,7 @@ typedef struct	s_cache_header
 	int32_t		pad;
 }				t_cache_header;
 
-static const char	g_magic[8] = "RTMESH1";
+static const char	g_magic[8] = "RTMESH2";
 
 static void			obj_stat(const char *path, uint64_t *size, int64_t *mtime)
 {

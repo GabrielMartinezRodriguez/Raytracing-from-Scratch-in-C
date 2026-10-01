@@ -75,6 +75,9 @@ typedef struct	s_gpu_tri
 
 # define MAT_TEXTURE 1
 # define MAT_ALPHA 2
+# define MAT_NORMAL 4
+# define MAT_ROUGH 8
+# define MAT_METAL 16
 
 typedef struct	s_gpu_light
 {
@@ -108,6 +111,9 @@ typedef struct	s_gpu_frame
 	t_vec4		prev_right;
 	t_vec4		prev_up;
 	t_vec4		jitter;
+	t_vec4		sun_dir;
+	t_vec4		sun_color;
+	t_vec4		env;
 }				t_gpu_frame;
 
 #endif

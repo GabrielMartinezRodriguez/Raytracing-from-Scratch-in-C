@@ -19,6 +19,7 @@
 #include "scene_export.h"
 #include "bvh.h"
 #include "obj_loader.h"
+#include "hdri.h"
 #include "shader_src.h"
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
@@ -40,6 +41,7 @@ static t_vec4		vec4(simd_float3 v)
 @property (nonatomic) float moveSpeed;
 @property (nonatomic) bool temporalOn;
 @property (nonatomic) bool giOn;
+- (void)loadEnv:(const char *)path rotation:(float)deg exposure:(float)ev;
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)buildInstances:(t_gpu_mesh *)mesh;
@@ -59,6 +61,8 @@ static t_vec4		vec4(simd_float3 v)
 - (void)encodePass:(int)pass to:(id<MTLTexture>)texture base:(id<MTLTexture>)base buffer:(id<MTLCommandBuffer>)cmd;
 - (void)cameraMatrices:(simd_float4x4 *)view proj:(simd_float4x4 *)proj aspect:(float)aspect;
 - (t_gpu_frame)frame;
+- (simd_float3)right;
+- (simd_float3)forward;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
@@ -132,6 +136,10 @@ static float	aces(float x)
 	float						_pathYaw;
 	simd_float4					_sceneMin;
 	simd_float4					_sceneMax;
+	id<MTLTexture>				_envTex;
+	simd_float4					_sunDir;
+	simd_float4					_sunColor;
+	simd_float4					_env;
 	double						_gpuMs;
 }
 
@@ -220,6 +228,10 @@ static float	aces(float x)
 	_lights = [_device newBufferWithBytes:scene->lights
 		length:sizeof(t_gpu_light) * (scene->nlights + 1)
 		options:MTLResourceStorageModeShared];
+	MTLTextureDescriptor *ed = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+		width:1 height:1 mipmapped:NO];
+	_envTex = [_device newTextureWithDescriptor:ed];
 	[self useCamera:0];
 	return (self);
 }
@@ -317,6 +329,11 @@ typedef struct	s_host_material
 {
 	simd_float4		kd;
 	MTLResourceID	diffuse;
+	MTLResourceID	normal;
+	MTLResourceID	rough;
+	MTLResourceID	metal;
+	float			roughness;
+	float			metallic;
 	uint32_t		flags;
 	uint32_t		pad;
 }				t_host_material;
@@ -362,33 +379,52 @@ static bool		has_transparency(CGImageRef img)
 	bool				*alpha = calloc(nm, sizeof(bool));
 	id<MTLDevice>		device = _device;
 
-	NSMutableArray *slots = [NSMutableArray arrayWithCapacity:nm];
-	for (int i = 0; i < nm; i++)
+	/*
+	** 4 mapas por material (color, relieve, rugosidad, metalicidad). El color
+	** se carga en sRGB; los demas son datos y van en lineal.
+	*/
+	int njobs = nm * 4;
+	NSMutableArray *slots = [NSMutableArray arrayWithCapacity:njobs];
+	for (int i = 0; i < njobs; i++)
 		[slots addObject:[NSNull null]];
-	dispatch_apply(nm, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-		^(size_t i) {
-		if (!mesh->mats[i].texture[0])
+	dispatch_apply(njobs, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+		^(size_t job) {
+		size_t i = job / 4;
+		int kind = (int)(job % 4);
+		const char *file = kind == 0 ? mesh->mats[i].texture
+			: kind == 1 ? mesh->mats[i].normal_map
+			: kind == 2 ? mesh->mats[i].rough_map : mesh->mats[i].metal_map;
+		if (!file[0])
 			return ;
-		NSURL *url = [NSURL fileURLWithPath:@(mesh->mats[i].texture)];
+		NSURL *url = [NSURL fileURLWithPath:@(file)];
 		CGImageSourceRef src = CGImageSourceCreateWithURL(
 			(__bridge CFURLRef)url, NULL);
 		if (!src)
+		{
+			fprintf(stderr, "aviso: no se pudo abrir %s\n", file);
 			return ;
+		}
 		CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
 		CFRelease(src);
 		if (!img)
+		{
+			fprintf(stderr, "aviso: no se pudo decodificar %s\n", file);
 			return ;
-		alpha[i] = has_transparency(img);
+		}
+		if (kind == 0)
+			alpha[i] = has_transparency(img);
 		MTKTextureLoader *loader = [[MTKTextureLoader alloc]
 			initWithDevice:device];
 		id<MTLTexture> tex = [loader newTextureWithCGImage:img options:@{
-			MTKTextureLoaderOptionSRGB: @YES,
+			MTKTextureLoaderOptionSRGB: @(kind == 0),
 			MTKTextureLoaderOptionGenerateMipmaps: @YES,
 			MTKTextureLoaderOptionTextureStorageMode: @(MTLStorageModePrivate)}
 			error:nil];
 		CGImageRelease(img);
 		if (tex)
-			@synchronized (slots) { slots[i] = tex; }
+			@synchronized (slots) { slots[job] = tex; }
+		else
+			fprintf(stderr, "aviso: no se pudo subir a la GPU %s\n", file);
 	});
 	id<MTLBuffer> mats = [_device newBufferWithLength:sizeof(t_host_material)
 		* nm options:MTLResourceStorageModeShared];
@@ -399,17 +435,31 @@ static bool		has_transparency(CGImageRef img)
 	{
 		memset(&hm[i], 0, sizeof(hm[i]));
 		hm[i].kd = mesh->mats[i].kd;
-		if (slots[i] != [NSNull null])
+		hm[i].roughness = mesh->mats[i].roughness;
+		hm[i].metallic = mesh->mats[i].metallic;
+		uint32_t bits[4] = {MAT_TEXTURE, MAT_NORMAL, MAT_ROUGH, MAT_METAL};
+		for (int k = 0; k < 4; k++)
 		{
-			id<MTLTexture> tex = slots[i];
-			hm[i].diffuse = tex.gpuResourceID;
-			hm[i].flags = MAT_TEXTURE | (alpha[i] ? MAT_ALPHA : 0);
+			if (slots[i * 4 + k] == [NSNull null])
+				continue ;
+			id<MTLTexture> tex = slots[i * 4 + k];
+			if (k == 0)
+				hm[i].diffuse = tex.gpuResourceID;
+			else if (k == 1)
+				hm[i].normal = tex.gpuResourceID;
+			else if (k == 2)
+				hm[i].rough = tex.gpuResourceID;
+			else
+				hm[i].metal = tex.gpuResourceID;
+			hm[i].flags |= bits[k];
 			[texs addObject:tex];
 			ntex++;
-			nalpha += alpha[i];
 		}
-		else
+		if (!(hm[i].flags & MAT_TEXTURE))
 			alpha[i] = false;
+		if (alpha[i])
+			hm[i].flags |= MAT_ALPHA;
+		nalpha += alpha[i];
 	}
 	_mats = mats;
 	_textures = texs;
@@ -588,6 +638,54 @@ static bool		has_transparency(CGImageRef img)
 		_ninsts, (double)_ninsts * _ntris / 1e6);
 }
 
+/*
+** Cielo HDRI: se carga, se le quita el sol (que pasa a ser una luz de
+** disco con su direccion y energia reales) y se sube a la GPU. deg gira el
+** cielo alrededor del eje vertical; ev es la exposicion de la camara.
+*/
+
+- (void)loadEnv:(const char *)path rotation:(float)deg exposure:(float)ev
+{
+	t_hdri	img;
+	float	dir[3];
+	float	col[3];
+	float	cosr;
+
+	if (load_hdr(path, &img) < 0)
+	{
+		fprintf(stderr, "error: no se pudo leer el HDRI %s\n", path);
+		exit(1);
+	}
+	extract_sun(&img, dir, col, &cosr);
+	float th = deg * M_PI / 180;
+	float c = cosf(th);
+	float s = sinf(th);
+	simd_float3 world = simd_make_float3(c * dir[0] - s * dir[2], dir[1],
+		s * dir[0] + c * dir[2]);
+	_sunDir = simd_make_float4(simd_normalize(world), cosr);
+	_sunColor = simd_make_float4(col[0] / M_PI, col[1] / M_PI, col[2] / M_PI, 1);
+	_env = simd_make_float4(1, 1, th, ev);
+	float *rgba = malloc(sizeof(float) * 4 * img.w * img.h);
+	for (int i = 0; i < img.w * img.h; i++)
+	{
+		rgba[i * 4] = img.rgb[i * 3];
+		rgba[i * 4 + 1] = img.rgb[i * 3 + 1];
+		rgba[i * 4 + 2] = img.rgb[i * 3 + 2];
+		rgba[i * 4 + 3] = 1;
+	}
+	MTLTextureDescriptor *td = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+		width:img.w height:img.h mipmapped:NO];
+	_envTex = [_device newTextureWithDescriptor:td];
+	[_envTex replaceRegion:MTLRegionMake2D(0, 0, img.w, img.h) mipmapLevel:0
+		withBytes:rgba bytesPerRow:img.w * 16];
+	free(rgba);
+	free(img.rgb);
+	printf("HDRI %dx%d; sol hacia (%.2f, %.2f, %.2f), %.2f grados de radio, "
+		"luz (%.1f, %.1f, %.1f)\n", img.w, img.h, _sunDir.x, _sunDir.y,
+		_sunDir.z, acosf(cosr) * 180 / M_PI, col[0], col[1], col[2]);
+}
+
 - (void)useCamera:(int)index
 {
 	t_gpu_camera	*camera = &_scene->cameras[index];
@@ -601,6 +699,21 @@ static bool		has_transparency(CGImageRef img)
 	_pathStart = _position;
 	_pathYaw = _yaw;
 	printf("camara %d/%d\n", index + 1, _scene->ncameras);
+}
+
+/*
+** Eje "derecha" de la camara. Las escenas .rt originales usan el convenio
+** de mano izquierda del proyecto; los modelos .obj (Blender y demas) son de
+** mano derecha, y con el convenio antiguo se veian como en un espejo.
+*/
+
+- (simd_float3)right
+{
+	simd_float3	fwd = [self forward];
+	simd_float3	up = simd_make_float3(0, 1, 0);
+
+	return (simd_normalize(_ntris > 0 ? simd_cross(fwd, up)
+		: simd_cross(up, fwd)));
 }
 
 - (simd_float3)forward
@@ -617,13 +730,12 @@ static bool		has_transparency(CGImageRef img)
 {
 	t_gpu_frame	f;
 	simd_float3	fwd = [self forward];
-	simd_float3	right = simd_normalize(simd_cross(
-		simd_make_float3(0, 1, 0), fwd));
+	simd_float3	right = [self right];
 
 	f.origin = vec4(_position);
 	f.forward = vec4(fwd);
 	f.right = vec4(right);
-	f.up = vec4(simd_cross(fwd, right));
+	f.up = vec4(_ntris > 0 ? simd_cross(right, fwd) : simd_cross(fwd, right));
 	f.ambient = _scene->ambient;
 	f.fov = _fov;
 	f.nobjects = _scene->nobjects;
@@ -631,6 +743,9 @@ static bool		has_transparency(CGImageRef img)
 	f.samples = _samples;
 	f.nplanes = _nplanes;
 	f.ntris = _ntris;
+	f.sun_dir = _sunDir;
+	f.sun_color = _sunColor;
+	f.env = _env;
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;
@@ -665,6 +780,7 @@ static bool		has_transparency(CGImageRef img)
 	[enc setTexture:(gi ? _gNormal : base) atIndex:5];
 	[enc setTexture:(gi ? _gRough : base) atIndex:6];
 	[enc setTexture:(gi ? _gSpec : base) atIndex:7];
+	[enc setTexture:_envTex atIndex:8];
 	if (pass == 3 || pass == 4)
 	{
 		f.prev_origin = _hasPrev ? _prev.origin : f.origin;
@@ -1088,8 +1204,7 @@ static bool		has_transparency(CGImageRef img)
 - (void)move:(float)dt
 {
 	simd_float3	fwd = [self forward];
-	simd_float3	right = simd_normalize(simd_cross(
-		simd_make_float3(0, 1, 0), fwd));
+	simd_float3	right = [self right];
 	float		speed = dt * _moveSpeed * (_fast ? 3 : 1);
 
 	_position += fwd * speed * (_keys[KEY_W] - _keys[KEY_S]);
@@ -1380,6 +1495,29 @@ int				main(int argc, char **argv)
 		** la escena del .rt, que sigue aportando camara, luces y resolucion.
 		*/
 		const char *obj_path = NULL;
+		const char *env_path = NULL;
+		float env_rot = 0;
+		float env_ev = 1;
+		for (int i = 1; i + 1 < argc; i++)
+			if (strcmp(argv[i], "--env") == 0)
+			{
+				int k = 2;
+				env_path = argv[i + 1];
+				if (i + 2 < argc && argv[i + 2][0] != '-')
+				{
+					env_rot = atof(argv[i + 2]);
+					k = 3;
+					if (i + 3 < argc && argv[i + 3][0] != '-')
+					{
+						env_ev = atof(argv[i + 3]);
+						k = 4;
+					}
+				}
+				for (int j = i; j + k <= argc; j++)
+					argv[j] = argv[j + k];
+				argc -= k;
+				break ;
+			}
 		for (int i = 1; i + 1 < argc; i++)
 			if (strcmp(argv[i], "--obj") == 0)
 			{
@@ -1416,6 +1554,8 @@ int				main(int argc, char **argv)
 		}
 		renderer = [[Renderer alloc] initWithScene:&scene
 			mesh:obj_path ? &mesh : NULL];
+		if (env_path)
+			[renderer loadEnv:env_path rotation:env_rot exposure:env_ev];
 		/*
 		** Con modelo: velocidad de paseo proporcional a su tamano (~4 m/s en
 		** San Miguel) y reescalado temporal activado en la ventana.

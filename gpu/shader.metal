@@ -19,12 +19,13 @@ using namespace raytracing;
 	MESH_ACCEL mesh_accel, \
 	intersection_function_table<MESH_TAGS> mesh_table, \
 	device const t_gpu_tri *tris, device const GpuMaterial *mats, \
-	device const packed_float3 *mesh_pos, device const float4 *insts
+	device const packed_float3 *mesh_pos, device const float4 *insts, \
+	texture2d<float> env_map
 # define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, \
-	mesh_pos, insts
+	mesh_pos, insts, env_map
 #else
-# define ACCEL_DECL device const t_gpu_node *nodes
-# define ACCEL_ARGS nodes
+# define ACCEL_DECL device const t_gpu_node *nodes, texture2d<float> env_map
+# define ACCEL_ARGS nodes, env_map
 #endif
 
 #include "shared.h"
@@ -40,6 +41,11 @@ struct			GpuMaterial
 {
 	float4				kd;
 	texture2d<float>	diffuse;
+	texture2d<float>	normal;
+	texture2d<float>	rough;
+	texture2d<float>	metal;
+	float				roughness;
+	float				metallic;
 	uint				flags;
 	uint				pad;
 };
@@ -476,8 +482,24 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 ** escenas .rt clasicas el fondo sigue siendo negro.
 */
 
-static float3	sky(float3 d)
+constexpr sampler	env_sampler(address::repeat, filter::linear);
+
+/*
+** Cielo: con HDRI (f.env.y > 0) se lee la foto de 360 grados en proyeccion
+** equirectangular, girada f.env.z radianes; sin HDRI, un degradado.
+*/
+
+static float3	sky(float3 d, constant t_gpu_frame &f, texture2d<float> env_map)
 {
+	if (f.env.y > 0)
+	{
+		float c = cos(f.env.z);
+		float sn = sin(f.env.z);
+		float3 r = float3(c * d.x + sn * d.z, d.y, -sn * d.x + c * d.z);
+		float2 uv = float2(atan2(r.x, -r.z) / (2 * M_PI_F) + 0.5f,
+			acos(clamp(r.y, -1.0f, 1.0f)) / M_PI_F);
+		return (env_map.sample(env_sampler, uv, level(0)).rgb * f.env.x);
+	}
 	float	up = clamp(d.y, 0.0f, 1.0f);
 
 	return (mix(float3(0.85f, 0.9f, 1.0f), float3(0.32f, 0.5f, 0.85f),
@@ -542,6 +564,9 @@ struct			Surf
 	float3		albedo;
 	float		refl;
 	float		spec;
+	float		rough;
+	float		metal;
+	bool		pbr;
 };
 
 /*
@@ -580,21 +605,58 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 			s.n = -s.n;
 		device const GpuMaterial &m = mats[t.material];
 		s.albedo = m.kd.rgb;
+		s.rough = m.roughness;
+		s.metal = m.metallic;
+		s.pbr = true;
+		/*
+		** Nivel de mipmap por "cono de rayo": cuanto mas lejos y mas de
+		** canto, mas grande es la huella del pixel en la textura. lod0 es
+		** para una textura de 1x1; cada mapa suma su propio tamano.
+		*/
+		float2 e1 = float2(t.uv[2] - t.uv[0], t.uv[3] - t.uv[1]);
+		float2 e2 = float2(t.uv[4] - t.uv[0], t.uv[5] - t.uv[1]);
+		float uv_det = e1.x * e2.y - e2.x * e1.y;
+		float lod0 = 0.5f * log2(max(fabs(uv_det), 1e-20f)
+			/ max(length(cr), 1e-12f))
+			+ log2(cone * f.spread / max(fabs(dot(s.ng, d)), 0.1f)) + lod_bias;
+		float2 uv = tri_uv(t, b);
 		if (m.flags & MAT_TEXTURE)
+			s.albedo *= m.diffuse.sample(tex_sampler, uv, level(max(lod0
+				+ 0.5f * log2((float)m.diffuse.get_width()
+				* m.diffuse.get_height()), 0.0f))).rgb;
+		if (m.flags & MAT_ROUGH)
+			s.rough = m.rough.sample(tex_sampler, uv, level(max(lod0 + 0.5f
+				* log2((float)m.rough.get_width() * m.rough.get_height()),
+				0.0f))).r;
+		if (m.flags & MAT_METAL)
+			s.metal = m.metal.sample(tex_sampler, uv, level(max(lod0 + 0.5f
+				* log2((float)m.metal.get_width() * m.metal.get_height()),
+				0.0f))).r;
+		if ((m.flags & MAT_NORMAL) && fabs(uv_det) > 1e-12f)
 		{
 			/*
-			** Nivel de mipmap por "cono de rayo": cuanto mas lejos y mas
-			** de canto, mas grande es la huella del pixel en la textura.
+			** Mapa de normales (convencion OpenGL): base tangente sacada de
+			** las posiciones y coordenadas de textura del triangulo.
 			*/
-			float2 e1 = float2(t.uv[2] - t.uv[0], t.uv[3] - t.uv[1]);
-			float2 e2 = float2(t.uv[4] - t.uv[0], t.uv[5] - t.uv[1]);
-			float uv_area = fabs(e1.x * e2.y - e2.x * e1.y)
-				* m.diffuse.get_width() * m.diffuse.get_height();
-			float lod = 0.5f * log2(uv_area / max(length(cr), 1e-12f))
-				+ log2(cone * f.spread / max(fabs(dot(s.ng, d)), 0.1f));
-			s.albedo *= m.diffuse.sample(tex_sampler, tri_uv(t, b),
-				level(max(lod + lod_bias, 0.0f))).rgb;
+			float3 tn = m.normal.sample(tex_sampler, uv, level(max(lod0
+				+ 0.5f * log2((float)m.normal.get_width()
+				* m.normal.get_height()), 0.0f))).rgb * 2 - 1;
+			float3 tg = ((p1 - p0) * e2.y - (p2 - p0) * e1.y) / uv_det;
+			float3 bt = ((p2 - p0) * e1.x - (p1 - p0) * e2.x) / uv_det;
+			tg = tg - s.n * dot(s.n, tg);
+			if (length_squared(tg) > 1e-12f)
+			{
+				tg = normalize(tg);
+				float3 bn = cross(s.n, tg) * (dot(cross(s.n, tg), bt) < 0
+					? -1.0f : 1.0f);
+				float3 nm = normalize(tg * tn.x + bn * tn.y + s.n * max(tn.z,
+					0.05f));
+				if (dot(nm, s.ng) > 0.02f)
+					s.n = nm;
+			}
 		}
+		s.rough = clamp(s.rough, 0.03f, 1.0f);
+		s.metal = clamp(s.metal, 0.0f, 1.0f);
 		s.refl = 0;
 		s.spec = MESH_SPECULAR;
 	}
@@ -609,6 +671,9 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 		s.albedo = obj.color.xyz;
 		s.refl = obj.reflect;
 		s.spec = SPECULAR;
+		s.rough = 1;
+		s.metal = 0;
+		s.pbr = false;
 	}
 	/*
 	** El error de coma flotante crece con la distancia al origen: un
@@ -619,14 +684,64 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 }
 
 /*
-** Luz directa de las lamparas (difusa + brillo), con sombras si se piden.
+** Modelo de material fisico: difuso de Lambert + reflexion especular GGX
+** (microfacetas) con Fresnel de Schlick y sombreado de Smith. Las luces van
+** en unidades "pi" (difuso = albedo * luz * coseno), asi que el especular se
+** multiplica por pi para mantener la proporcion.
+*/
+
+static float3	fresnel(float3 f0, float c)
+{
+	return (f0 + (1 - f0) * pow(clamp(1 - c, 0.0f, 1.0f), 5.0f));
+}
+
+static float	ggx_d(float nh, float a)
+{
+	float a2 = a * a;
+	float k = nh * nh * (a2 - 1) + 1;
+
+	return (a2 / (M_PI_F * k * k));
+}
+
+static float	smith_g1(float c, float a)
+{
+	float a2 = a * a;
+
+	return (2 * c / (c + sqrt(a2 + (1 - a2) * c * c)));
+}
+
+static float3	brdf_pi(Surf s, float3 v, float3 l)
+{
+	float3	h = normalize(v + l);
+	float	nl = max(dot(s.n, l), 0.0f);
+	float	nv = max(dot(s.n, v), 1e-4f);
+	float	a = s.rough * s.rough;
+	float3	f0 = mix(float3(0.04f), s.albedo, s.metal);
+	float3	F = fresnel(f0, max(dot(v, h), 0.0f));
+	float3	spec = ggx_d(max(dot(s.n, h), 0.0f), a) * smith_g1(nl, a)
+		* smith_g1(nv, a) / (4 * nv * max(nl, 1e-4f)) * F * M_PI_F;
+
+	return ((1 - F) * (1 - s.metal) * s.albedo + spec);
+}
+
+static float	rand01(uint seed)
+{
+	return ((hash(seed) & 0xffffff) / 16777216.0f);
+}
+
+/*
+** Luz directa: lamparas del .rt y, si hay HDRI, el sol como un disco con su
+** tamano real: cada rayo de sombra apunta a un punto al azar del disco, y
+** de ahi salen las sombras con penumbra.
 */
 
 static float3	direct_light(Surf s, float3 d, bool shadows,
 					constant t_gpu_frame &f, device const t_gpu_object *objs,
-					device const t_gpu_light *lights, ACCEL_DECL)
+					device const t_gpu_light *lights, ACCEL_DECL,
+					uint seed = 0)
 {
 	float3	local = float3(0);
+	float3	v = -d;
 
 	for (int i = 0; i < f.nlights; i++)
 	{
@@ -638,10 +753,33 @@ static float3	direct_light(Surf s, float3 d, bool shadows,
 			&& intersect(s.p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0))
 			continue ;
 		float3 lc = lights[i].color.xyz;
+		if (s.pbr)
+		{
+			local += lc * ndl * brdf_pi(s, v, l);
+			continue ;
+		}
 		local += s.albedo * lc * ndl;
 		float ndh = dot(s.n, normalize(l - d));
 		if (ndh > 0)
 			local += lc * s.spec * pow(ndh, SHININESS);
+	}
+	if (f.sun_color.w > 0)
+	{
+		float3	w = f.sun_dir.xyz;
+		float3	t = normalize(fabs(w.y) < 0.9f ? cross(w, float3(0, 1, 0))
+			: cross(w, float3(1, 0, 0)));
+		float3	b = cross(w, t);
+		float	u1 = rand01(seed * 3 + 11);
+		float	u2 = rand01(seed * 5 + 29);
+		float	ct = 1 - u1 * (1 - f.sun_dir.w);
+		float	st = sqrt(max(0.0f, 1 - ct * ct));
+		float3	l = normalize(w * ct + t * (st * cos(2 * M_PI_F * u2))
+			+ b * (st * sin(2 * M_PI_F * u2)));
+		float	ndl = dot(s.n, l);
+		if (ndl > 0 && dot(s.ng, l) > 0 && (!shadows
+			|| intersect(s.p, l, f, objs, ACCEL_ARGS, NOHIT, true).id < 0))
+			local += f.sun_color.rgb * ndl * (s.pbr ? brdf_pi(s, v, l)
+				: s.albedo);
 	}
 	return (local);
 }
@@ -662,7 +800,7 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 		if (hit.id < 0)
 		{
 			if (f.ntris > 0)
-				color += weight * sky(d);
+				color += weight * sky(d, f, env_map);
 			break ;
 		}
 		cone += hit.t;
@@ -704,17 +842,40 @@ static float3	cosine_dir(float3 n, uint seed)
 }
 
 /*
-** Iluminacion global: luz directa del sol + GI_BOUNCES rebotes difusos
-** (direccion aleatoria con distribucion coseno). Cada rebote ve cielo o
-** una superficie iluminada por el sol. Devuelve ademas los datos que pide
-** el denoiser: color de la superficie, normal y distancia del primer impacto.
+** Direccion reflejada muestreando la distribucion GGX (microfaceta al azar
+** alrededor de la normal segun la rugosidad).
+*/
+
+static float3	ggx_dir(float3 n, float3 v, float a, uint seed,
+					thread float3 &h)
+{
+	float	u1 = rand01(seed * 13 + 7);
+	float	u2 = rand01(seed * 17 + 3);
+	float	ct = sqrt((1 - u1) / (1 + (a * a - 1) * u1));
+	float	st = sqrt(max(0.0f, 1 - ct * ct));
+	float3	t = normalize(fabs(n.x) > 0.5f ? cross(n, float3(0, 1, 0))
+		: cross(n, float3(1, 0, 0)));
+	float3	b = cross(n, t);
+
+	h = normalize(t * (st * cos(2 * M_PI_F * u2)) + b * (st * sin(2 * M_PI_F
+		* u2)) + n * ct);
+	return (reflect(-v, h));
+}
+
+/*
+** Iluminacion global: luz directa (lamparas, sol con penumbra) + GI_BOUNCES
+** rebotes. En cada rebote se elige entre la parte difusa (direccion coseno)
+** y la especular (direccion GGX), con mas probabilidad de especular cuanto
+** mas metalico y liso es el material. Devuelve tambien las guias del
+** denoiser del primer impacto.
 */
 
 static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 					device const t_gpu_object *objs,
 					device const t_gpu_light *lights, ACCEL_DECL, uint seed,
 					thread float &first_t, thread float3 &first_albedo,
-					thread float3 &first_normal)
+					thread float3 &first_normal, thread float3 &first_spec,
+					thread float &first_rough)
 {
 	float3	color = float3(0);
 	float3	weight = float3(1);
@@ -723,12 +884,15 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 	first_t = NOHIT;
 	first_albedo = float3(1);
 	first_normal = float3(0, 0, 1);
+	first_spec = float3(0.04f);
+	first_rough = 1;
 	for (int depth = 0; depth <= GI_BOUNCES; depth++)
 	{
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
 		{
-			color += weight * sky(d) * (depth == 0 ? 1.0f : SKY_LIGHT);
+			color += weight * sky(d, f, env_map) * (depth == 0 || f.env.y > 0
+				? 1.0f : SKY_LIGHT);
 			break ;
 		}
 		cone += hit.t;
@@ -738,21 +902,44 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 		*/
 		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS,
 			depth > 0 ? BOUNCE_LOD_BIAS : 0.0f);
+		float3 f0 = mix(float3(0.04f), s.albedo, s.metal);
 		if (depth == 0)
 		{
 			first_t = hit.t;
-			first_albedo = s.albedo;
+			first_albedo = s.albedo * (1 - s.metal);
 			first_normal = s.n;
+			first_spec = f0;
+			first_rough = s.rough;
 		}
-		color += weight * direct_light(s, d, depth < GI_SHADOW_BOUNCES, f, objs,
-			lights, ACCEL_ARGS);
+		color += weight * direct_light(s, d, true, f, objs, lights, ACCEL_ARGS,
+			seed + depth * 7919);
 		if (depth == GI_BOUNCES)
 			break ;
-		weight *= s.albedo;
+		float3 v = -d;
+		float ps = s.pbr ? clamp(mix(0.15f, 1.0f, s.metal) * (1.2f
+			- s.rough), 0.1f, 0.95f) : 0.0f;
 		o = s.p;
-		d = cosine_dir(s.n, seed + depth * 7919);
-		if (dot(d, s.ng) <= 0)
-			break ;
+		if (rand01(seed * 19 + depth * 31 + 5) < ps)
+		{
+			float3 h;
+			float a = s.rough * s.rough;
+			d = ggx_dir(s.n, v, a, seed + depth * 4513, h);
+			float nl = dot(s.n, d);
+			float nv = max(dot(s.n, v), 1e-4f);
+			if (nl <= 0 || dot(d, s.ng) <= 0)
+				break ;
+			float vh = max(dot(v, h), 1e-4f);
+			weight *= fresnel(f0, vh) * smith_g1(nl, a) * smith_g1(nv, a) * vh
+				/ (nv * max(dot(s.n, h), 1e-4f)) / ps;
+		}
+		else
+		{
+			d = cosine_dir(s.n, seed + depth * 7919);
+			if (dot(d, s.ng) <= 0)
+				break ;
+			weight *= s.albedo * (1 - s.metal) * (s.pbr ? 1 - fresnel(f0,
+				max(dot(s.n, v), 0.0f)) : float3(1)) / (1 - ps);
+		}
 	}
 	return (color);
 }
@@ -791,6 +978,9 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					device const GpuMaterial *mats [[buffer(11)]],
 					device const packed_float3 *mesh_pos [[buffer(12)]],
 					device const float4 *insts [[buffer(13)]],
+#endif
+					texture2d<float> env_map [[texture(8)]],
+#ifdef HW_RT
 #else
 					device const t_gpu_node *nodes [[buffer(3)]],
 #endif
@@ -825,14 +1015,16 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 		float first_t;
 		float3 alb;
 		float3 nrm;
+		float3 spc;
+		float rgh;
 		float3 c = trace_gi(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
 			hash(gid.x * 1973 + gid.y * 9277 + f.frame * 104729), first_t,
-			alb, nrm);
-		out.write(float4(c * GI_EXPOSURE, 1), gid);
+			alb, nrm, spc, rgh);
+		out.write(float4(c * (f.env.y > 0 ? f.env.w : GI_EXPOSURE), 1), gid);
 		albedo_out.write(float4(alb, 1), gid);
 		normal_out.write(float4(nrm, 0), gid);
-		rough_out.write(float4(0.9f), gid);
-		spec_out.write(float4(0.04f, 0.04f, 0.04f, 1), gid);
+		rough_out.write(float4(rgh), gid);
+		spec_out.write(float4(spc, 1), gid);
 		float3 world = f.origin.xyz + d * min(first_t, 1e5f);
 		float3 v = world - f.prev_origin.xyz;
 		float z = dot(v, f.prev_forward.xyz);
