@@ -46,6 +46,8 @@ static t_vec4		vec4(simd_float3 v)
 - (void)keyUp:(unsigned short)key;
 - (void)lookBy:(float)dx :(float)dy;
 - (void)setFast:(bool)fast;
+- (void)pathAt:(float)t frame:(unsigned int)frame;
+- (double)renderOnce:(id<MTLTexture>)texture;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
@@ -84,6 +86,9 @@ static t_vec4		vec4(simd_float3 v)
 	CFTimeInterval				_last;
 	CFTimeInterval				_fpsStart;
 	int							_frames;
+	unsigned int				_frame;
+	simd_float3					_pathStart;
+	float						_pathYaw;
 	simd_float4					_sceneMin;
 	simd_float4					_sceneMax;
 	double						_gpuMs;
@@ -427,6 +432,18 @@ static bool		has_transparency(CGImageRef img)
 		(CACurrentMediaTime() - t0) * 1000);
 }
 
+/*
+** Recorrido de prueba: desde la camara 1 avanza 2,5 m y gira 0,25 rad.
+** Deterministico por t (0..1) para poder comparar con las referencias.
+*/
+
+- (void)pathAt:(float)t frame:(unsigned int)frame
+{
+	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * t;
+	_yaw = _pathYaw + 0.25f * t;
+	_frame = frame;
+}
+
 - (void)useCamera:(int)index
 {
 	t_gpu_camera	*camera = &_scene->cameras[index];
@@ -437,6 +454,8 @@ static bool		has_transparency(CGImageRef img)
 	_yaw = atan2f(dir.x, dir.z);
 	_pitch = asinf(dir.y);
 	_fov = camera->fov;
+	_pathStart = _position;
+	_pathYaw = _yaw;
 	printf("camara %d/%d\n", index + 1, _scene->ncameras);
 }
 
@@ -468,6 +487,8 @@ static bool		has_transparency(CGImageRef img)
 	f.samples = _samples;
 	f.nplanes = _nplanes;
 	f.ntris = _ntris;
+	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
+	f.frame = _frame;
 	f.nopaque = _nopaque;
 	f.scene_min = _sceneMin - 0.01f;
 	f.scene_max = _sceneMax + 0.01f;
@@ -773,6 +794,44 @@ static void		bench(Renderer *renderer, int aa)
 		(int)texture.height, aa, aa, times[7]);
 }
 
+/*
+** --path N [prefijo] [aa]: N imagenes con la camara en movimiento. Imprime la
+** mediana y el p95 del tiempo de GPU por imagen; con prefijo guarda 3
+** imagenes de control (a 1/3, 2/3 y al final) para medir la calidad.
+*/
+
+static void		path_bench(Renderer *renderer, int n, const char *prefix, int aa)
+{
+	id<MTLTexture>	texture = [renderer offscreenTexture];
+	double			*times = malloc(sizeof(double) * n);
+	char			name[1100];
+
+	renderer.samples = aa;
+	[renderer pathAt:0 frame:0];
+	[renderer renderOnce:texture];
+	for (int i = 0; i < n; i++)
+	{
+		bool check = (i == n / 3 || i == 2 * n / 3 || i == n - 1);
+		if (getenv("RT_CHECKPOINTS_ONLY") && !check)
+		{
+			times[i] = 0;
+			continue ;
+		}
+		[renderer pathAt:(float)i / (n - 1) frame:i];
+		times[i] = [renderer renderOnce:texture];
+		if (prefix && check)
+		{
+			snprintf(name, sizeof(name), "%s_f%03d", prefix, i);
+			save_png(texture, name);
+		}
+	}
+	qsort(times, n, sizeof(double), cmp_double);
+	printf("path %dx%d AA %dx%d, %d imagenes: mediana %.3f ms, p95 %.3f ms\n",
+		(int)texture.width, (int)texture.height, aa, aa, n, times[n / 2],
+		times[(int)(n * 0.95)]);
+	free(times);
+}
+
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 {
 	NSApplication	*app = [NSApplication sharedApplication];
@@ -866,6 +925,9 @@ int				main(int argc, char **argv)
 			printf("render: %.2f ms\n", [renderer renderOnce:texture]);
 			save_png(texture, argc >= 4 ? argv[3] : "scene");
 		}
+		else if (argc >= 4 && strcmp(argv[2], "--path") == 0)
+			path_bench(renderer, atoi(argv[3]), argc >= 5 ? argv[4] : NULL,
+				argc >= 6 ? atoi(argv[5]) : 1);
 		else if (argc >= 3 && strcmp(argv[2], "--bench") == 0)
 			bench(renderer, argc >= 4 ? atoi(argv[3]) : 1);
 		else

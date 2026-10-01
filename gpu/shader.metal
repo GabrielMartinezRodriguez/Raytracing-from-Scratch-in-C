@@ -49,7 +49,6 @@ constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
-constant int	AO_RAYS = 8;
 constant float	AO_RADIUS = 1.5;
 constant float	EDGE = 0.1;
 constant float	SHADOW_MIN_WEIGHT = 0.25;
@@ -468,7 +467,7 @@ static uint		hash(uint x)
 }
 
 /*
-** Oclusion ambiental: fraccion de AO_RAYS rayos cortos (AO_RADIUS) hacia
+** Oclusion ambiental: fraccion de f.ao_rays rayos cortos (AO_RADIUS) hacia
 ** el hemisferio de la normal que no chocan con nada. Distribucion coseno
 ** con una rotacion aleatoria por pixel.
 */
@@ -484,16 +483,16 @@ static float	ambient_occlusion(float3 p, float3 n, uint seed,
 	float	r1 = (hash(seed * 7 + 3) & 0xffff) / 65536.0f;
 	int		open = 0;
 
-	for (int i = 0; i < AO_RAYS; i++)
+	for (int i = 0; i < f.ao_rays; i++)
 	{
 		float u = fract(r0 + i * 0.618034f);
-		float v = fract(r1 + (i + 0.5f) / AO_RAYS);
+		float v = fract(r1 + (i + 0.5f) / f.ao_rays);
 		float r = sqrt(v);
 		float phi = 2 * M_PI_F * u;
 		float3 dir = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(1 - v);
 		open += intersect(p, dir, f, objs, ACCEL_ARGS, AO_RADIUS, true).id < 0;
 	}
-	return ((float)open / AO_RAYS);
+	return ((float)open / f.ao_rays);
 }
 
 static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
@@ -681,7 +680,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
 			float3 c = trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
-				hash(gid.x * 1973 + gid.y * 9277 + (sy * samples + sx) * 26699));
+				hash(gid.x * 1973 + gid.y * 9277 + (sy * samples + sx) * 26699
+				+ f.frame * 104729));
 			color += f.ntris > 0 ? tonemap(c * EXPOSURE) : c;
 		}
 	color /= samples * samples;

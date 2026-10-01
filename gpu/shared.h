@@ -98,7 +98,9 @@ typedef struct	s_gpu_frame
 	int			ntris;
 	int			nopaque;
 	float		spread;
-	int			pad[3];
+	int			ao_rays;
+	unsigned int	frame;
+	int			pad;
 	t_vec4		scene_min;
 	t_vec4		scene_max;
 }				t_gpu_frame;
