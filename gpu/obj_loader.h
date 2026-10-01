@@ -24,6 +24,8 @@ typedef struct	s_gpu_mesh
 	t_mesh_material	*mats;
 	int				nmats;
 	int				capmats;
+	void			*map;
+	size_t			map_size;
 }				t_gpu_mesh;
 
 /*
@@ -33,5 +35,13 @@ typedef struct	s_gpu_mesh
 
 long			load_obj(t_gpu_mesh *mesh, const char *path);
 unsigned int	pack_normal(simd_float3 n);
+
+/*
+** Cache binaria junto al .obj (modelo.obj.rtcache): load_obj_cached la usa
+** si coincide con el .obj (tamano y fecha) y si no, la genera.
+*/
+
+long			load_obj_cached(t_gpu_mesh *mesh, const char *path);
+void			free_mesh_data(t_gpu_mesh *mesh);
 
 #endif

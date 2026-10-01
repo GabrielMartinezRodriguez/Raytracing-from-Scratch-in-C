@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -395,4 +396,111 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 	free(obj.vt);
 	free(obj.vn);
 	return ((long)mesh->ntris);
+}
+
+typedef struct	s_cache_header
+{
+	char		magic[8];
+	uint64_t	obj_size;
+	int64_t		obj_mtime;
+	uint64_t	ntris;
+	int32_t		nmats;
+	int32_t		pad;
+}				t_cache_header;
+
+static const char	g_magic[8] = "RTMESH1";
+
+static void			obj_stat(const char *path, uint64_t *size, int64_t *mtime)
+{
+	struct stat	st;
+
+	*size = 0;
+	*mtime = 0;
+	if (stat(path, &st) == 0)
+	{
+		*size = st.st_size;
+		*mtime = st.st_mtimespec.tv_sec;
+	}
+}
+
+static int			save_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
+{
+	t_cache_header	h;
+	FILE			*f = fopen(cache, "wb");
+
+	if (!f)
+		return (-1);
+	memset(&h, 0, sizeof(h));
+	memcpy(h.magic, g_magic, 8);
+	obj_stat(obj, &h.obj_size, &h.obj_mtime);
+	h.ntris = mesh->ntris;
+	h.nmats = mesh->nmats;
+	fwrite(&h, sizeof(h), 1, f);
+	fwrite(mesh->mats, sizeof(t_mesh_material), mesh->nmats, f);
+	fwrite(mesh->pos, sizeof(float) * 9, mesh->ntris, f);
+	fwrite(mesh->tris, sizeof(t_gpu_tri), mesh->ntris, f);
+	fclose(f);
+	return (0);
+}
+
+static long			load_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
+{
+	size_t				size;
+	char				*data = map_file(cache, &size);
+	const t_cache_header	*h = (const t_cache_header *)data;
+	uint64_t			osize;
+	int64_t				omtime;
+
+	if (!data)
+		return (-1);
+	obj_stat(obj, &osize, &omtime);
+	if (size < sizeof(*h) || memcmp(h->magic, g_magic, 8) != 0
+		|| h->obj_size != osize || h->obj_mtime != omtime
+		|| size != sizeof(*h) + h->nmats * sizeof(t_mesh_material)
+		+ h->ntris * (sizeof(float) * 9 + sizeof(t_gpu_tri)))
+	{
+		munmap(data, size);
+		return (-1);
+	}
+	mesh->nmats = h->nmats;
+	mesh->capmats = h->nmats;
+	mesh->mats = malloc(sizeof(t_mesh_material) * h->nmats);
+	memcpy(mesh->mats, data + sizeof(*h), sizeof(t_mesh_material) * h->nmats);
+	mesh->ntris = h->ntris;
+	mesh->cap = h->ntris;
+	mesh->pos = (float *)(data + sizeof(*h) + sizeof(t_mesh_material) * h->nmats);
+	mesh->tris = (t_gpu_tri *)((char *)mesh->pos + sizeof(float) * 9 * h->ntris);
+	mesh->map = data;
+	mesh->map_size = size;
+	return ((long)mesh->ntris);
+}
+
+long				load_obj_cached(t_gpu_mesh *mesh, const char *path)
+{
+	char	cache[2048];
+	long	n;
+
+	snprintf(cache, sizeof(cache), "%s.rtcache", path);
+	if ((n = load_cache(mesh, path, cache)) >= 0)
+	{
+		printf("obj: %ld triangulos desde la cache %s\n", n, cache);
+		return (n);
+	}
+	if ((n = load_obj(mesh, path)) >= 0 && save_cache(mesh, path, cache) == 0)
+		printf("cache guardada en %s\n", cache);
+	return (n);
+}
+
+void				free_mesh_data(t_gpu_mesh *mesh)
+{
+	if (mesh->map)
+		munmap(mesh->map, mesh->map_size);
+	else
+	{
+		free(mesh->pos);
+		free(mesh->tris);
+	}
+	mesh->map = NULL;
+	mesh->pos = NULL;
+	mesh->tris = NULL;
 }

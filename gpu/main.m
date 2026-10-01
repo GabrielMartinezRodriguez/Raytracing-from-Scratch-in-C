@@ -398,10 +398,7 @@ static bool		has_transparency(CGImageRef img)
 		tris[k] = mesh->tris[i];
 	}
 	free(alpha);
-	free(mesh->pos);
-	free(mesh->tris);
-	mesh->pos = NULL;
-	mesh->tris = NULL;
+	free_mesh_data(mesh);
 	_ntris = (int)n;
 	_nopaque = (int)nop;
 	NSMutableArray *geos = [NSMutableArray array];
@@ -1025,7 +1022,7 @@ int				main(int argc, char **argv)
 		if (obj_path)
 		{
 			CFTimeInterval t0 = CACurrentMediaTime();
-			if (load_obj(&mesh, obj_path) < 0)
+			if (load_obj_cached(&mesh, obj_path) < 0)
 				return (1);
 			simd_float3 lo = simd_make_float3(INFINITY, INFINITY, INFINITY);
 			simd_float3 hi = -lo;
