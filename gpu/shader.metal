@@ -62,6 +62,8 @@ constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
 constant int	GI_BOUNCES = 2;
+constant int	GI_SHADOW_BOUNCES = 3;
+constant float	BOUNCE_LOD_BIAS = 3.0f;
 constant float	CLIP_NEAR = 0.05f;
 constant float	CLIP_FAR = 1000.0f;
 constant float	SKY_LIGHT = 2.0;
@@ -549,7 +551,7 @@ struct			Surf
 
 static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 					constant t_gpu_frame &f, device const t_gpu_object *objs,
-					ACCEL_DECL)
+					ACCEL_DECL, float lod_bias = 0)
 {
 	Surf	s;
 
@@ -591,7 +593,7 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 			float lod = 0.5f * log2(uv_area / max(length(cr), 1e-12f))
 				+ log2(cone * f.spread / max(fabs(dot(s.ng, d)), 0.1f));
 			s.albedo *= m.diffuse.sample(tex_sampler, tri_uv(t, b),
-				level(max(lod, 0.0f))).rgb;
+				level(max(lod + lod_bias, 0.0f))).rgb;
 		}
 		s.refl = 0;
 		s.spec = MESH_SPECULAR;
@@ -730,14 +732,20 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 			break ;
 		}
 		cone += hit.t;
-		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS);
+		/*
+		** La luz rebotada no necesita texturas nitidas: en los rebotes se lee
+		** un nivel de mipmap mas borroso (menos memoria).
+		*/
+		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS,
+			depth > 0 ? BOUNCE_LOD_BIAS : 0.0f);
 		if (depth == 0)
 		{
 			first_t = hit.t;
 			first_albedo = s.albedo;
 			first_normal = s.n;
 		}
-		color += weight * direct_light(s, d, true, f, objs, lights, ACCEL_ARGS);
+		color += weight * direct_light(s, d, depth < GI_SHADOW_BOUNCES, f, objs,
+			lights, ACCEL_ARGS);
 		if (depth == GI_BOUNCES)
 			break ;
 		weight *= s.albedo;

@@ -968,7 +968,8 @@ static bool		has_transparency(CGImageRef img)
 	_denoiser.worldToViewMatrix = view;
 	_denoiser.viewToClipMatrix = proj;
 	_denoiser.shouldResetHistory = !_hasPrev;
-	[_denoiser encodeToCommandBuffer:cmd];
+	if (!getenv("RT_SKIP_DENOISE"))
+		[_denoiser encodeToCommandBuffer:cmd];
 	_hasPrev = true;
 	[self encodePass:5 to:texture base:_gOut buffer:cmd];
 }
