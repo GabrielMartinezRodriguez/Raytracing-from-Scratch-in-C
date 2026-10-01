@@ -18,6 +18,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "scene_export.h"
 #include "bvh.h"
+#include "obj_loader.h"
 #include "shader_src.h"
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
@@ -584,7 +585,40 @@ int				main(int argc, char **argv)
 				argv[0]);
 			return (1);
 		}
+		/*
+		** --obj modelo.obj (en cualquier posicion): anade sus triangulos a
+		** la escena del .rt, que sigue aportando camara, luces y resolucion.
+		*/
+		const char *obj_path = NULL;
+		for (int i = 1; i + 1 < argc; i++)
+			if (strcmp(argv[i], "--obj") == 0)
+			{
+				obj_path = argv[i + 1];
+				for (int j = i; j + 2 <= argc; j++)
+					argv[j] = argv[j + 2];
+				argc -= 2;
+				break ;
+			}
 		export_scene(argv[1], &scene);
+		if (obj_path)
+		{
+			CFTimeInterval t0 = CACurrentMediaTime();
+			if (load_obj(&scene, obj_path) < 0)
+				return (1);
+			simd_float3 lo = simd_make_float3(INFINITY, INFINITY, INFINITY);
+			simd_float3 hi = -lo;
+			for (int i = 0; i < scene.nobjects; i++)
+				if (scene.objects[i].type == GPU_TRIANGLE)
+				{
+					lo = simd_min(lo, simd_min(scene.objects[i].a.xyz,
+						simd_min(scene.objects[i].b.xyz, scene.objects[i].c.xyz)));
+					hi = simd_max(hi, simd_max(scene.objects[i].a.xyz,
+						simd_max(scene.objects[i].b.xyz, scene.objects[i].c.xyz)));
+				}
+			printf("modelo cargado en %.0f ms; limites (%.1f, %.1f, %.1f) a "
+				"(%.1f, %.1f, %.1f)\n", (CACurrentMediaTime() - t0) * 1000,
+				lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+		}
 		renderer = [[Renderer alloc] initWithScene:&scene];
 		if (argc >= 3 && strcmp(argv[2], "--save") == 0)
 		{
