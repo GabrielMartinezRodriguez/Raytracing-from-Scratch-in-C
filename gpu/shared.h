@@ -60,6 +60,22 @@ typedef struct	s_gpu_node
 	int			count;
 }				t_gpu_node;
 
+/*
+** Atributos de un triangulo de malla (.obj), 40 bytes: coordenadas de
+** textura de sus 3 vertices, normales de vertice comprimidas (octaedro,
+** 2 x 16 bits) e indice de material.
+*/
+
+typedef struct	s_gpu_tri
+{
+	float		uv[6];
+	unsigned int	n[3];
+	unsigned int	material;
+}				t_gpu_tri;
+
+# define MAT_TEXTURE 1
+# define MAT_ALPHA 2
+
 typedef struct	s_gpu_light
 {
 	t_vec4		position;
@@ -79,7 +95,10 @@ typedef struct	s_gpu_frame
 	int			samples;
 	int			nplanes;
 	int			pass;
-	int			pad[2];
+	int			ntris;
+	int			nopaque;
+	float		spread;
+	int			pad[3];
 	t_vec4		scene_min;
 	t_vec4		scene_max;
 }				t_gpu_frame;

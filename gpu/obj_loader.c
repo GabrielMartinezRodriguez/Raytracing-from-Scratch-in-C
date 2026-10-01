@@ -1,11 +1,11 @@
 /*
 ** Cargador de modelos .obj (Wavefront) para la version GPU.
 **
-** Lee vertices (v), caras (f, poligonos de n lados que se parten en
-** triangulos en abanico) y materiales (usemtl + mtllib, solo el color
-** difuso Kd). Cada triangulo se anade a la escena como un objeto
-** GPU_TRIANGLE. Para que 10 millones de triangulos carguen en segundos,
-** el fichero se mapea en memoria y los numeros se parsean a mano.
+** Lee vertices (v), coordenadas de textura (vt), normales (vn), caras (f,
+** poligonos de n lados que se parten en triangulos en abanico) y
+** materiales (usemtl + mtllib: color difuso Kd y textura map_Kd). Para que
+** 10 millones de triangulos carguen en segundos, el fichero se mapea en
+** memoria y los numeros se parsean a mano.
 */
 
 #include <fcntl.h>
@@ -18,22 +18,26 @@
 #include <unistd.h>
 #include "obj_loader.h"
 
-typedef struct	s_material
-{
-	char		name[128];
-	t_vec4		color;
-}				t_material;
-
 typedef struct	s_obj
 {
-	simd_float3	*verts;
-	size_t		nverts;
-	size_t		capverts;
-	t_material	*mats;
-	int			nmats;
-	int			capmats;
-	t_vec4		current;
+	simd_float3	*v;
+	simd_float2	*vt;
+	simd_float3	*vn;
+	size_t		nv;
+	size_t		nvt;
+	size_t		nvn;
+	size_t		capv;
+	size_t		capvt;
+	size_t		capvn;
+	unsigned int	material;
 }				t_obj;
+
+typedef struct	s_corner
+{
+	long		v;
+	long		vt;
+	long		vn;
+}				t_corner;
 
 static const char	*skip_spaces(const char *p, const char *end)
 {
@@ -78,40 +82,65 @@ static float		parse_float(const char **pp, const char *end)
 	return ((float)(sign * value));
 }
 
-/*
-** Lee el indice de vertice de un "v", "v/vt", "v//vn" o "v/vt/vn" e ignora
-** el resto. Los indices negativos cuentan desde el final.
-*/
-
-static long			parse_index(const char **pp, const char *end, size_t nverts)
+static long			parse_int(const char **pp, const char *end, size_t count)
 {
-	const char	*p = skip_spaces(*pp, end);
+	const char	*p = *pp;
 	long		sign = 1;
 	long		value = 0;
 
-	if (p >= end || *p == '\n' || *p == '\r')
-		return (0);
-	if (*p == '-')
+	if (p < end && *p == '-')
 	{
 		sign = -1;
 		p++;
 	}
 	while (p < end && *p >= '0' && *p <= '9')
 		value = value * 10 + (*p++ - '0');
-	while (p < end && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
-		p++;
 	*pp = p;
 	if (value == 0)
 		return (0);
-	return (sign > 0 ? value : (long)nverts - value + 1);
+	return (sign > 0 ? value : (long)count - value + 1);
 }
 
-static void			read_name(const char *p, const char *end, char *out)
+/*
+** Una esquina de cara: "v", "v/vt", "v//vn" o "v/vt/vn". Los indices
+** negativos cuentan desde el final. Devuelve 0 si no hay mas esquinas.
+*/
+
+static int			parse_corner(const char **pp, const char *end, t_obj *obj,
+						t_corner *c)
 {
-	int i = 0;
+	const char	*p = skip_spaces(*pp, end);
+
+	c->v = 0;
+	c->vt = 0;
+	c->vn = 0;
+	if (p >= end || *p == '\n' || *p == '\r' || *p == '#')
+		return (0);
+	c->v = parse_int(&p, end, obj->nv);
+	if (p < end && *p == '/')
+	{
+		p++;
+		if (p < end && *p != '/')
+			c->vt = parse_int(&p, end, obj->nvt);
+		if (p < end && *p == '/')
+		{
+			p++;
+			c->vn = parse_int(&p, end, obj->nvn);
+		}
+	}
+	while (p < end && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+		p++;
+	*pp = p;
+	return (c->v != 0);
+}
+
+static void			read_name(const char *p, const char *end, char *out,
+						size_t len)
+{
+	size_t i = 0;
 
 	p = skip_spaces(p, end);
-	while (p < end && *p != '\n' && *p != '\r' && i < 127)
+	while (p < end && *p != '\n' && *p != '\r' && i + 1 < len)
 		out[i++] = *p++;
 	while (i > 0 && (out[i - 1] == ' ' || out[i - 1] == '\t'))
 		i--;
@@ -124,20 +153,47 @@ static void			*map_file(const char *path, size_t *size)
 	struct stat	st;
 	void		*data;
 
-	if (fd < 0 || fstat(fd, &st) < 0)
+	if (fd < 0)
 		return (NULL);
+	if (fstat(fd, &st) < 0)
+	{
+		close(fd);
+		return (NULL);
+	}
 	*size = st.st_size;
 	data = mmap(NULL, *size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
 	return (data == MAP_FAILED ? NULL : data);
 }
 
-static void			load_mtl(t_obj *obj, const char *path)
+static t_mesh_material	*new_material(t_gpu_mesh *mesh, const char *name)
 {
-	size_t		size;
-	const char	*data = map_file(path, &size);
-	const char	*p;
-	const char	*end;
+	t_mesh_material	*m;
+
+	if (mesh->nmats == mesh->capmats)
+	{
+		mesh->capmats = mesh->capmats ? mesh->capmats * 2 : 64;
+		mesh->mats = realloc(mesh->mats, sizeof(t_mesh_material) * mesh->capmats);
+	}
+	m = &mesh->mats[mesh->nmats++];
+	memset(m, 0, sizeof(*m));
+	snprintf(m->name, sizeof(m->name), "%s", name);
+	m->kd = simd_make_float4(0.8f, 0.8f, 0.8f, 0);
+	return (m);
+}
+
+/*
+** Las rutas del .mtl de San Miguel vienen con barras de Windows.
+*/
+
+static void			load_mtl(t_gpu_mesh *mesh, const char *path, const char *dir)
+{
+	size_t			size;
+	const char		*data = map_file(path, &size);
+	const char		*p;
+	const char		*end;
+	t_mesh_material	*m = NULL;
+	char			file[1024];
 
 	if (!data)
 	{
@@ -150,57 +206,95 @@ static void			load_mtl(t_obj *obj, const char *path)
 		p = skip_spaces(p, end);
 		if (end - p > 7 && strncmp(p, "newmtl", 6) == 0)
 		{
-			if (obj->nmats == obj->capmats)
-			{
-				obj->capmats = obj->capmats ? obj->capmats * 2 : 64;
-				obj->mats = realloc(obj->mats, sizeof(t_material) * obj->capmats);
-			}
-			read_name(p + 6, end, obj->mats[obj->nmats].name);
-			obj->mats[obj->nmats++].color = (t_vec4){0.8f, 0.8f, 0.8f, 0};
+			read_name(p + 6, end, file, sizeof(file));
+			m = new_material(mesh, file);
 		}
-		else if (end - p > 3 && p[0] == 'K' && p[1] == 'd' && obj->nmats > 0)
+		else if (m && end - p > 3 && p[0] == 'K' && p[1] == 'd')
 		{
 			const char *q = p + 2;
 			float r = parse_float(&q, end);
 			float g = parse_float(&q, end);
 			float b = parse_float(&q, end);
-			obj->mats[obj->nmats - 1].color = (t_vec4){r, g, b, 0};
+			m->kd = simd_make_float4(r, g, b, 0);
+		}
+		else if (m && end - p > 7 && strncmp(p, "map_Kd", 6) == 0)
+		{
+			read_name(p + 6, end, file, sizeof(file));
+			for (char *c = file; *c; c++)
+				if (*c == '\\')
+					*c = '/';
+			snprintf(m->texture, sizeof(m->texture), "%s/%s", dir, file);
 		}
 	}
 	munmap((void *)data, size);
 }
 
-static void			use_material(t_obj *obj, const char *name)
+static unsigned int	find_material(t_gpu_mesh *mesh, const char *name)
 {
-	for (int i = 0; i < obj->nmats; i++)
-		if (strcmp(obj->mats[i].name, name) == 0)
-		{
-			obj->current = obj->mats[i].color;
-			return ;
-		}
-	obj->current = (t_vec4){0.8f, 0.8f, 0.8f, 0};
+	for (int i = 1; i < mesh->nmats; i++)
+		if (strcmp(mesh->mats[i].name, name) == 0)
+			return (i);
+	return (0);
 }
 
-static void			add_triangle(t_gpu_scene *scene, size_t *cap, t_obj *obj,
-						long a, long b, long c)
+static short		to_snorm(float x)
 {
-	t_gpu_object	*o;
+	x = fminf(fmaxf(x, -1), 1);
+	return ((short)lrintf(x * 32767.0f));
+}
 
-	if (a < 1 || b < 1 || c < 1 || (size_t)a > obj->nverts
-		|| (size_t)b > obj->nverts || (size_t)c > obj->nverts)
-		return ;
-	if ((size_t)scene->nobjects + 1 >= *cap)
+/*
+** Normal unitaria comprimida en 32 bits (proyeccion octaedrica). 0 = sin
+** normal: la GPU usara la normal geometrica del triangulo.
+*/
+
+unsigned int		pack_normal(simd_float3 n)
+{
+	float		l1 = fabsf(n.x) + fabsf(n.y) + fabsf(n.z);
+	simd_float2	p;
+
+	if (l1 < 1e-12f)
+		return (0);
+	n /= l1;
+	p = simd_make_float2(n.x, n.y);
+	if (n.z < 0)
+		p = simd_make_float2((1 - fabsf(n.y)) * (n.x >= 0 ? 1 : -1),
+			(1 - fabsf(n.x)) * (n.y >= 0 ? 1 : -1));
+	return ((unsigned short)to_snorm(p.x)
+		| ((unsigned int)(unsigned short)to_snorm(p.y) << 16));
+}
+
+static void			add_triangle(t_gpu_mesh *mesh, t_obj *obj, t_corner *c)
+{
+	t_gpu_tri	*t;
+	float		*pos;
+
+	for (int k = 0; k < 3; k++)
+		if (c[k].v < 1 || (size_t)c[k].v > obj->nv)
+			return ;
+	if (mesh->ntris == mesh->cap)
 	{
-		*cap *= 2;
-		scene->objects = realloc(scene->objects, sizeof(t_gpu_object) * *cap);
+		mesh->cap = mesh->cap ? mesh->cap * 2 : 1 << 20;
+		mesh->tris = realloc(mesh->tris, sizeof(t_gpu_tri) * mesh->cap);
+		mesh->pos = realloc(mesh->pos, sizeof(float) * 9 * mesh->cap);
 	}
-	o = &scene->objects[scene->nobjects++];
-	memset(o, 0, sizeof(*o));
-	o->a = simd_make_float4(obj->verts[a - 1], 0);
-	o->b = simd_make_float4(obj->verts[b - 1], 0);
-	o->c = simd_make_float4(obj->verts[c - 1], 0);
-	o->color = obj->current;
-	o->type = GPU_TRIANGLE;
+	t = &mesh->tris[mesh->ntris];
+	pos = &mesh->pos[mesh->ntris * 9];
+	mesh->ntris++;
+	for (int k = 0; k < 3; k++)
+	{
+		simd_float3 v = obj->v[c[k].v - 1];
+		pos[k * 3] = v.x;
+		pos[k * 3 + 1] = v.y;
+		pos[k * 3 + 2] = v.z;
+		simd_float2 uv = (c[k].vt >= 1 && (size_t)c[k].vt <= obj->nvt)
+			? obj->vt[c[k].vt - 1] : simd_make_float2(0, 0);
+		t->uv[k * 2] = uv.x;
+		t->uv[k * 2 + 1] = uv.y;
+		t->n[k] = (c[k].vn >= 1 && (size_t)c[k].vn <= obj->nvn)
+			? pack_normal(obj->vn[c[k].vn - 1]) : 0;
+	}
+	t->material = obj->material;
 }
 
 static void			dir_of(const char *path, char *out, size_t len)
@@ -208,25 +302,24 @@ static void			dir_of(const char *path, char *out, size_t len)
 	const char *slash = strrchr(path, '/');
 
 	if (!slash)
-	{
 		snprintf(out, len, ".");
-		return ;
-	}
-	snprintf(out, len, "%.*s", (int)(slash - path), path);
+	else
+		snprintf(out, len, "%.*s", (int)(slash - path), path);
 }
 
-int					load_obj(t_gpu_scene *scene, const char *path)
+#define GROW(arr, n, cap) do { if ((n) == (cap)) { (cap) = (cap) ? (cap) * 2 \
+	: 1 << 16; (arr) = realloc((arr), sizeof(*(arr)) * (cap)); } } while (0)
+
+long				load_obj(t_gpu_mesh *mesh, const char *path)
 {
 	size_t		size;
 	const char	*data = map_file(path, &size);
 	const char	*p;
 	const char	*end;
 	t_obj		obj;
-	size_t		cap;
 	char		dir[1024];
-	char		name[128];
-	long		idx[64];
-	int			before = scene->nobjects;
+	char		name[1024];
+	t_corner	c[3];
 
 	if (!data)
 	{
@@ -234,11 +327,8 @@ int					load_obj(t_gpu_scene *scene, const char *path)
 		return (-1);
 	}
 	memset(&obj, 0, sizeof(obj));
-	obj.current = (t_vec4){0.8f, 0.8f, 0.8f, 0};
-	obj.capverts = 1 << 20;
-	obj.verts = malloc(sizeof(simd_float3) * obj.capverts);
-	cap = scene->nobjects + (1 << 20);
-	scene->objects = realloc(scene->objects, sizeof(t_gpu_object) * cap);
+	if (mesh->nmats == 0)
+		new_material(mesh, "(por defecto)");
 	dir_of(path, dir, sizeof(dir));
 	end = data + size;
 	for (p = data; p < end; p = next_line(p, end))
@@ -249,43 +339,60 @@ int					load_obj(t_gpu_scene *scene, const char *path)
 		if (p[0] == 'v' && (p[1] == ' ' || p[1] == '\t'))
 		{
 			const char *q = p + 1;
-			if (obj.nverts == obj.capverts)
-			{
-				obj.capverts *= 2;
-				obj.verts = realloc(obj.verts, sizeof(simd_float3) * obj.capverts);
-			}
+			GROW(obj.v, obj.nv, obj.capv);
 			float x = parse_float(&q, end);
 			float y = parse_float(&q, end);
 			float z = parse_float(&q, end);
-			obj.verts[obj.nverts++] = simd_make_float3(x, y, z);
+			obj.v[obj.nv++] = simd_make_float3(x, y, z);
+		}
+		else if (p[0] == 'v' && p[1] == 't')
+		{
+			const char *q = p + 2;
+			GROW(obj.vt, obj.nvt, obj.capvt);
+			float u = parse_float(&q, end);
+			float v = parse_float(&q, end);
+			obj.vt[obj.nvt++] = simd_make_float2(u, v);
+		}
+		else if (p[0] == 'v' && p[1] == 'n')
+		{
+			const char *q = p + 2;
+			GROW(obj.vn, obj.nvn, obj.capvn);
+			float x = parse_float(&q, end);
+			float y = parse_float(&q, end);
+			float z = parse_float(&q, end);
+			obj.vn[obj.nvn++] = simd_make_float3(x, y, z);
 		}
 		else if (p[0] == 'f' && (p[1] == ' ' || p[1] == '\t'))
 		{
-			const char	*q = p + 1;
-			int			n = 0;
-			long		v;
-			while (n < 64 && (v = parse_index(&q, end, obj.nverts)) != 0)
-				idx[n++] = v;
-			for (int i = 1; i + 1 < n; i++)
-				add_triangle(scene, &cap, &obj, idx[0], idx[i], idx[i + 1]);
+			const char *q = p + 1;
+			if (!parse_corner(&q, end, &obj, &c[0])
+				|| !parse_corner(&q, end, &obj, &c[1]))
+				continue ;
+			while (parse_corner(&q, end, &obj, &c[2]))
+			{
+				add_triangle(mesh, &obj, c);
+				c[1] = c[2];
+			}
 		}
 		else if (strncmp(p, "usemtl", 6) == 0)
 		{
-			read_name(p + 6, end, name);
-			use_material(&obj, name);
+			read_name(p + 6, end, name, sizeof(name));
+			obj.material = find_material(mesh, name);
 		}
 		else if (strncmp(p, "mtllib", 6) == 0)
 		{
-			char mtl[1200];
-			read_name(p + 6, end, name);
+			char mtl[2100];
+			read_name(p + 6, end, name, sizeof(name));
 			snprintf(mtl, sizeof(mtl), "%s/%s", dir, name);
-			load_mtl(&obj, mtl);
+			load_mtl(mesh, mtl, dir);
 		}
 	}
 	munmap((void *)data, size);
-	printf("obj: %zu vertices, %d triangulos, %d materiales\n", obj.nverts,
-		scene->nobjects - before, obj.nmats);
-	free(obj.verts);
-	free(obj.mats);
-	return (scene->nobjects - before);
+	printf("obj: %zu vertices, %zu coordenadas de textura, %zu normales, "
+		"%zu triangulos, %d materiales\n", obj.nv, obj.nvt, obj.nvn,
+		mesh->ntris, mesh->nmats - 1);
+	free(obj.v);
+	free(obj.vt);
+	free(obj.vn);
+	return ((long)mesh->ntris);
 }

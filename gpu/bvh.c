@@ -186,20 +186,27 @@ static void		build(t_build *s, int index, int first, int count)
 	build(s, left + 1, i, first + count - i);
 }
 
-t_gpu_node		*build_bvh(t_gpu_scene *scene, int *nnodes, int *nplanes)
+int				partition_planes(t_gpu_scene *scene)
 {
-	t_build	s;
-	int		n = scene->nobjects;
-	int		p = 0;
-	int		i;
+	int p = 0;
 
-	for (i = 0; i < n; i++)
+	for (int i = 0; i < scene->nobjects; i++)
 		if (scene->objects[i].type == GPU_PLANE)
 		{
 			t_gpu_object tmp = scene->objects[p];
 			scene->objects[p++] = scene->objects[i];
 			scene->objects[i] = tmp;
 		}
+	return (p);
+}
+
+t_gpu_node		*build_bvh(t_gpu_scene *scene, int *nnodes, int *nplanes)
+{
+	t_build	s;
+	int		n = scene->nobjects;
+	int		p = partition_planes(scene);
+	int		i;
+
 	*nplanes = p;
 	s.objs = scene->objects + p;
 	n -= p;

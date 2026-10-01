@@ -7,6 +7,7 @@
 ** y despues el resto en el orden de las hojas del BVH.
 */
 
+int				partition_planes(t_gpu_scene *scene);
 t_gpu_node		*build_bvh(t_gpu_scene *scene, int *nnodes, int *nplanes);
 
 void			object_bounds(t_gpu_object *o, float *min, float *max);

@@ -37,7 +37,8 @@ static t_vec4		vec4(simd_float3 v)
 
 @interface Renderer : NSObject <MTKViewDelegate>
 @property (nonatomic) int samples;
-- (instancetype)initWithScene:(t_gpu_scene *)scene;
+- (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
+- (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)offscreenTexture;
 - (void)useCamera:(int)index;
@@ -63,6 +64,15 @@ static t_vec4		vec4(simd_float3 v)
 	int							_nplanes;
 	id<MTLAccelerationStructure>	_accel;
 	id<MTLIntersectionFunctionTable>	_table;
+	id<MTLAccelerationStructure>	_meshAccel;
+	id<MTLIntersectionFunctionTable>	_meshTable;
+	id<MTLBuffer>				_meshPos;
+	id<MTLBuffer>				_tris;
+	id<MTLBuffer>				_mats;
+	id<MTLBuffer>				_meshBase;
+	NSArray						*_textures;
+	int							_ntris;
+	int							_nopaque;
 	simd_float3					_position;
 	float						_yaw;
 	float						_pitch;
@@ -79,7 +89,7 @@ static t_vec4		vec4(simd_float3 v)
 	double						_gpuMs;
 }
 
-- (instancetype)initWithScene:(t_gpu_scene *)scene
+- (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh
 {
 	NSError				*error = nil;
 	id<MTLLibrary>		library;
@@ -105,11 +115,19 @@ static t_vec4		vec4(simd_float3 v)
 	MTLComputePipelineDescriptor *pdesc = [MTLComputePipelineDescriptor new];
 	pdesc.computeFunction = [library newFunctionWithName:@"render"];
 	id<MTLFunction> shape_fn = nil;
+	id<MTLFunction> alpha_fn = nil;
+	if (mesh && mesh->ntris > 0 && !_hardware)
+	{
+		fprintf(stderr, "error: los modelos .obj necesitan ray tracing por "
+			"hardware (no uses RT_HW=0)\n");
+		exit(1);
+	}
 	if (_hardware)
 	{
 		shape_fn = [library newFunctionWithName:@"shape_hit"];
+		alpha_fn = [library newFunctionWithName:@"alpha_test"];
 		MTLLinkedFunctions *linked = [MTLLinkedFunctions linkedFunctions];
-		linked.functions = @[shape_fn];
+		linked.functions = @[shape_fn, alpha_fn];
 		pdesc.linkedFunctions = linked;
 	}
 	_pipeline = [_device newComputePipelineStateWithDescriptor:pdesc
@@ -122,20 +140,35 @@ static t_vec4		vec4(simd_float3 v)
 	}
 	printf("modo: %s\n", _hardware ? "ray tracing por hardware"
 		: "BVH por software");
-	int nnodes;
-	CFTimeInterval t0 = CACurrentMediaTime();
-	t_gpu_node *nodes = build_bvh(scene, &nnodes, &_nplanes);
-	printf("BVH: %d nodos en %.1f ms\n", nnodes,
-		(CACurrentMediaTime() - t0) * 1000);
-	_nodes = [_device newBufferWithBytes:nodes
-		length:sizeof(t_gpu_node) * (nnodes + 1)
-		options:MTLResourceStorageModeShared];
-	free(nodes);
+	/*
+	** Con hardware el arbol por software no se usa: solo se separan los
+	** planos (antes costaba 6 s con San Miguel).
+	*/
+	if (_hardware)
+	{
+		_nplanes = partition_planes(scene);
+		_nodes = [_device newBufferWithLength:sizeof(t_gpu_node)
+			options:MTLResourceStorageModeShared];
+	}
+	else
+	{
+		int nnodes;
+		CFTimeInterval t0 = CACurrentMediaTime();
+		t_gpu_node *nodes = build_bvh(scene, &nnodes, &_nplanes);
+		printf("BVH: %d nodos en %.1f ms\n", nnodes,
+			(CACurrentMediaTime() - t0) * 1000);
+		_nodes = [_device newBufferWithBytes:nodes
+			length:sizeof(t_gpu_node) * (nnodes + 1)
+			options:MTLResourceStorageModeShared];
+		free(nodes);
+	}
 	_objects = [_device newBufferWithBytes:scene->objects
 		length:sizeof(t_gpu_object) * (scene->nobjects + 1)
 		options:MTLResourceStorageModeShared];
 	if (_hardware && scene->nobjects > _nplanes)
 		[self buildAccel:shape_fn];
+	if (_hardware && mesh && mesh->ntris > 0)
+		[self buildMesh:mesh alpha:alpha_fn];
 	_lights = [_device newBufferWithBytes:scene->lights
 		length:sizeof(t_gpu_light) * (scene->nlights + 1)
 		options:MTLResourceStorageModeShared];
@@ -205,6 +238,195 @@ static t_vec4		vec4(simd_float3 v)
 		(CACurrentMediaTime() - t0) * 1000);
 }
 
+/*
+** Material tal como lo lee la GPU (struct GpuMaterial del shader).
+*/
+
+typedef struct	s_host_material
+{
+	simd_float4		kd;
+	MTLResourceID	diffuse;
+	uint32_t		flags;
+	uint32_t		pad;
+}				t_host_material;
+
+/*
+** true si la imagen tiene algun pixel con transparencia real.
+*/
+
+static bool		has_transparency(CGImageRef img)
+{
+	CGImageAlphaInfo	info = CGImageGetAlphaInfo(img);
+	size_t				w = CGImageGetWidth(img);
+	size_t				h = CGImageGetHeight(img);
+	bool				found = false;
+
+	if (info == kCGImageAlphaNone || info == kCGImageAlphaNoneSkipLast
+		|| info == kCGImageAlphaNoneSkipFirst)
+		return (false);
+	uint8_t *px = malloc(w * h * 4);
+	CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+	CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs,
+		(CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+	CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), img);
+	for (size_t i = 3; i < w * h * 4 && !found; i += 4)
+		found = px[i] < 128;
+	CGContextRelease(ctx);
+	CGColorSpaceRelease(cs);
+	free(px);
+	return (found);
+}
+
+/*
+** Malla de triangulos para las unidades RT: texturas (en paralelo, con
+** mipmaps), triangulos ordenados en opacos + con transparencia (estos
+** llaman a alpha_test) y estructura de aceleracion de triangulos nativos.
+*/
+
+- (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn
+{
+	CFTimeInterval		t0 = CACurrentMediaTime();
+	int					nm = mesh->nmats;
+	NSMutableArray		*texs = [NSMutableArray arrayWithCapacity:nm];
+	bool				*alpha = calloc(nm, sizeof(bool));
+	id<MTLDevice>		device = _device;
+
+	NSMutableArray *slots = [NSMutableArray arrayWithCapacity:nm];
+	for (int i = 0; i < nm; i++)
+		[slots addObject:[NSNull null]];
+	dispatch_apply(nm, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+		^(size_t i) {
+		if (!mesh->mats[i].texture[0])
+			return ;
+		NSURL *url = [NSURL fileURLWithPath:@(mesh->mats[i].texture)];
+		CGImageSourceRef src = CGImageSourceCreateWithURL(
+			(__bridge CFURLRef)url, NULL);
+		if (!src)
+			return ;
+		CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+		CFRelease(src);
+		if (!img)
+			return ;
+		alpha[i] = has_transparency(img);
+		MTKTextureLoader *loader = [[MTKTextureLoader alloc]
+			initWithDevice:device];
+		id<MTLTexture> tex = [loader newTextureWithCGImage:img options:@{
+			MTKTextureLoaderOptionSRGB: @YES,
+			MTKTextureLoaderOptionGenerateMipmaps: @YES,
+			MTKTextureLoaderOptionTextureStorageMode: @(MTLStorageModePrivate)}
+			error:nil];
+		CGImageRelease(img);
+		if (tex)
+			@synchronized (slots) { slots[i] = tex; }
+	});
+	id<MTLBuffer> mats = [_device newBufferWithLength:sizeof(t_host_material)
+		* nm options:MTLResourceStorageModeShared];
+	t_host_material *hm = mats.contents;
+	int ntex = 0;
+	int nalpha = 0;
+	for (int i = 0; i < nm; i++)
+	{
+		memset(&hm[i], 0, sizeof(hm[i]));
+		hm[i].kd = mesh->mats[i].kd;
+		if (slots[i] != [NSNull null])
+		{
+			id<MTLTexture> tex = slots[i];
+			hm[i].diffuse = tex.gpuResourceID;
+			hm[i].flags = MAT_TEXTURE | (alpha[i] ? MAT_ALPHA : 0);
+			[texs addObject:tex];
+			ntex++;
+			nalpha += alpha[i];
+		}
+		else
+			alpha[i] = false;
+	}
+	_mats = mats;
+	_textures = texs;
+	printf("texturas: %d cargadas (%d con transparencia) en %.0f ms\n", ntex,
+		nalpha, (CACurrentMediaTime() - t0) * 1000);
+
+	/*
+	** Opacos primero y transparentes despues: dos geometrias del mismo
+	** buffer, y solo la segunda paga la llamada a alpha_test.
+	*/
+	t0 = CACurrentMediaTime();
+	size_t n = mesh->ntris;
+	size_t nop = 0;
+	for (size_t i = 0; i < n; i++)
+		nop += !alpha[mesh->tris[i].material];
+	_meshPos = [_device newBufferWithLength:sizeof(float) * 9 * n
+		options:MTLResourceStorageModeShared];
+	_tris = [_device newBufferWithLength:sizeof(t_gpu_tri) * n
+		options:MTLResourceStorageModeShared];
+	float *pos = _meshPos.contents;
+	t_gpu_tri *tris = _tris.contents;
+	size_t io = 0;
+	size_t ia = nop;
+	for (size_t i = 0; i < n; i++)
+	{
+		size_t k = alpha[mesh->tris[i].material] ? ia++ : io++;
+		memcpy(&pos[k * 9], &mesh->pos[i * 9], sizeof(float) * 9);
+		tris[k] = mesh->tris[i];
+	}
+	free(alpha);
+	free(mesh->pos);
+	free(mesh->tris);
+	mesh->pos = NULL;
+	mesh->tris = NULL;
+	_ntris = (int)n;
+	_nopaque = (int)nop;
+	NSMutableArray *geos = [NSMutableArray array];
+	for (int k = 0; k < 2; k++)
+	{
+		size_t first = k == 0 ? 0 : nop;
+		size_t count = k == 0 ? nop : n - nop;
+		if (count == 0)
+			continue ;
+		MTLAccelerationStructureTriangleGeometryDescriptor *g =
+			[MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+		g.vertexBuffer = _meshPos;
+		g.vertexBufferOffset = first * 9 * sizeof(float);
+		g.vertexStride = 3 * sizeof(float);
+		g.triangleCount = count;
+		g.opaque = (k == 0);
+		g.intersectionFunctionTableOffset = 0;
+		[geos addObject:g];
+	}
+	MTLPrimitiveAccelerationStructureDescriptor *desc =
+		[MTLPrimitiveAccelerationStructureDescriptor descriptor];
+	desc.geometryDescriptors = geos;
+	MTLAccelerationStructureSizes sizes =
+		[_device accelerationStructureSizesWithDescriptor:desc];
+	_meshAccel = [_device newAccelerationStructureWithSize:
+		sizes.accelerationStructureSize];
+	id<MTLBuffer> scratch = [_device newBufferWithLength:
+		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	id<MTLAccelerationStructureCommandEncoder> enc =
+		[cmd accelerationStructureCommandEncoder];
+	[enc buildAccelerationStructure:_meshAccel descriptor:desc
+		scratchBuffer:scratch scratchBufferOffset:0];
+	[enc endEncoding];
+	[cmd commit];
+	[cmd waitUntilCompleted];
+	uint32_t base = (uint32_t)nop;
+	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
+		options:MTLResourceStorageModeShared];
+	MTLIntersectionFunctionTableDescriptor *tdesc =
+		[MTLIntersectionFunctionTableDescriptor new];
+	tdesc.functionCount = 1;
+	_meshTable = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
+	[_meshTable setFunction:[_pipeline functionHandleWithFunction:alpha_fn]
+		atIndex:0];
+	[_meshTable setBuffer:_tris offset:0 atIndex:0];
+	[_meshTable setBuffer:_mats offset:0 atIndex:1];
+	[_meshTable setBuffer:_meshBase offset:0 atIndex:2];
+	printf("malla: %zu triangulos (%zu opacos, %zu con transparencia), "
+		"estructura de %.0f MB en %.0f ms\n", n, nop, n - nop,
+		sizes.accelerationStructureSize / 1048576.0,
+		(CACurrentMediaTime() - t0) * 1000);
+}
+
 - (void)useCamera:(int)index
 {
 	t_gpu_camera	*camera = &_scene->cameras[index];
@@ -245,6 +467,8 @@ static t_vec4		vec4(simd_float3 v)
 	f.nlights = _scene->nlights;
 	f.samples = _samples;
 	f.nplanes = _nplanes;
+	f.ntris = _ntris;
+	f.nopaque = _nopaque;
 	f.scene_min = _sceneMin - 0.01f;
 	f.scene_max = _sceneMax + 0.01f;
 	return (f);
@@ -257,6 +481,7 @@ static t_vec4		vec4(simd_float3 v)
 	t_gpu_frame						f = [self frame];
 
 	f.pass = pass;
+	f.spread = 2 * tanf(f.fov * M_PI / 360) / texture.width;
 	[enc setComputePipelineState:_pipeline];
 	[enc setTexture:texture atIndex:0];
 	[enc setTexture:base atIndex:1];
@@ -271,6 +496,18 @@ static t_vec4		vec4(simd_float3 v)
 	}
 	else
 		[enc setBuffer:_nodes offset:0 atIndex:3];
+	if (_meshAccel)
+	{
+		[enc setAccelerationStructure:_meshAccel atBufferIndex:8];
+		[enc setIntersectionFunctionTable:_meshTable atBufferIndex:9];
+		[enc setBuffer:_tris offset:0 atIndex:10];
+		[enc setBuffer:_mats offset:0 atIndex:11];
+		[enc setBuffer:_meshPos offset:0 atIndex:12];
+		[enc useResource:_meshAccel usage:MTLResourceUsageRead];
+		[enc useResource:_meshBase usage:MTLResourceUsageRead];
+		for (id<MTLTexture> t in _textures)
+			[enc useResource:t usage:MTLResourceUsageRead];
+	}
 	[enc dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
 		threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
@@ -600,26 +837,28 @@ int				main(int argc, char **argv)
 				break ;
 			}
 		export_scene(argv[1], &scene);
+		t_gpu_mesh mesh;
+		memset(&mesh, 0, sizeof(mesh));
 		if (obj_path)
 		{
 			CFTimeInterval t0 = CACurrentMediaTime();
-			if (load_obj(&scene, obj_path) < 0)
+			if (load_obj(&mesh, obj_path) < 0)
 				return (1);
 			simd_float3 lo = simd_make_float3(INFINITY, INFINITY, INFINITY);
 			simd_float3 hi = -lo;
-			for (int i = 0; i < scene.nobjects; i++)
-				if (scene.objects[i].type == GPU_TRIANGLE)
-				{
-					lo = simd_min(lo, simd_min(scene.objects[i].a.xyz,
-						simd_min(scene.objects[i].b.xyz, scene.objects[i].c.xyz)));
-					hi = simd_max(hi, simd_max(scene.objects[i].a.xyz,
-						simd_max(scene.objects[i].b.xyz, scene.objects[i].c.xyz)));
-				}
+			for (size_t i = 0; i < mesh.ntris * 3; i++)
+			{
+				simd_float3 v = simd_make_float3(mesh.pos[i * 3],
+					mesh.pos[i * 3 + 1], mesh.pos[i * 3 + 2]);
+				lo = simd_min(lo, v);
+				hi = simd_max(hi, v);
+			}
 			printf("modelo cargado en %.0f ms; limites (%.1f, %.1f, %.1f) a "
 				"(%.1f, %.1f, %.1f)\n", (CACurrentMediaTime() - t0) * 1000,
 				lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
 		}
-		renderer = [[Renderer alloc] initWithScene:&scene];
+		renderer = [[Renderer alloc] initWithScene:&scene
+			mesh:obj_path ? &mesh : NULL];
 		if (argc >= 3 && strcmp(argv[2], "--save") == 0)
 		{
 			id<MTLTexture> texture = [renderer offscreenTexture];

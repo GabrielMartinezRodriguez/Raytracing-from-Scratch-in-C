@@ -3,14 +3,38 @@ using namespace metal;
 #ifdef HW_RT
 # include <metal_raytracing>
 using namespace raytracing;
-# define ACCEL_DECL primitive_acceleration_structure accel, intersection_function_table<> table
-# define ACCEL_ARGS accel, table
+# define ACCEL_DECL primitive_acceleration_structure accel, \
+	intersection_function_table<> table, \
+	primitive_acceleration_structure mesh_accel, \
+	intersection_function_table<triangle_data> mesh_table, \
+	device const t_gpu_tri *tris, device const GpuMaterial *mats, \
+	device const packed_float3 *mesh_pos
+# define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, mesh_pos
 #else
 # define ACCEL_DECL device const t_gpu_node *nodes
 # define ACCEL_ARGS nodes
 #endif
 
 #include "shared.h"
+
+#ifdef HW_RT
+
+/*
+** Material de malla. La textura es una referencia sin enlazar (Metal 3):
+** el host escribe su gpuResourceID en el mismo sitio (32 bytes en total).
+*/
+
+struct			GpuMaterial
+{
+	float4				kd;
+	texture2d<float>	diffuse;
+	uint				flags;
+	uint				pad;
+};
+
+constexpr sampler	tex_sampler(address::repeat, filter::linear,
+						mip_filter::linear);
+#endif
 
 /*
 ** Port a Metal de generateImage/shading.c: mismas intersecciones y mismo
@@ -20,6 +44,7 @@ using namespace raytracing;
 
 constant int	MAX_DEPTH = 5;
 constant float	SPECULAR = 0.4;
+constant float	MESH_SPECULAR = 0.05;
 constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
@@ -33,6 +58,8 @@ struct			Hit
 	float		t;
 	float3		normal;
 	int			id;
+	float2		bary;
+	bool		mesh;
 };
 
 static float	hit_plane(float3 o, float3 d, float3 p, float3 n)
@@ -188,6 +215,41 @@ static float		hit_object(float3 o, float3 d, device const t_gpu_object &obj,
 ** del buffer en la tabla de funciones).
 */
 
+static float3	unpack_normal(uint v)
+{
+	if (v == 0)
+		return (float3(0));
+	float2 e = unpack_snorm2x16_to_float(v);
+	float3 n = float3(e.x, e.y, 1 - fabs(e.x) - fabs(e.y));
+	if (n.z < 0)
+		n.xy = (1 - fabs(n.yx)) * select(float2(-1), float2(1), n.xy >= 0);
+	return (normalize(n));
+}
+
+static float2	tri_uv(device const t_gpu_tri &t, float2 b)
+{
+	return (float2(t.uv[0], t.uv[1]) * (1 - b.x - b.y)
+		+ float2(t.uv[2], t.uv[3]) * b.x + float2(t.uv[4], t.uv[5]) * b.y);
+}
+
+/*
+** Hojas y demas materiales con transparencia: el hardware pregunta si el
+** punto tocado del triangulo es opaco segun el canal alfa de la textura.
+*/
+
+[[intersection(triangle, triangle_data)]]
+bool			alpha_test(uint pid [[primitive_id]],
+					float2 bary [[barycentric_coord]],
+					device const t_gpu_tri *tris [[buffer(0)]],
+					device const GpuMaterial *mats [[buffer(1)]],
+					constant uint &base [[buffer(2)]])
+{
+	device const t_gpu_tri &t = tris[base + pid];
+
+	return (mats[t.material].diffuse.sample(tex_sampler, tri_uv(t, bary),
+		level(0)).a >= 0.5f);
+}
+
 struct			BoxResult
 {
 	bool		accept [[accept_intersection]];
@@ -230,6 +292,24 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 		if (t < hit.t)
 		{
 			hit = {t, normal, i};
+			if (any)
+				return (hit);
+		}
+	}
+	if (f.ntris > 0)
+	{
+		intersector<triangle_data> mi;
+		mi.assume_geometry_type(geometry_type::triangle);
+		mi.accept_any_intersection(any);
+		ray mr(o, d, 0.0f, hit.t);
+		intersection_result<triangle_data> mres = mi.intersect(mr, mesh_accel,
+			mesh_table);
+		if (mres.type == intersection_type::triangle)
+		{
+			uint tri = (mres.geometry_id == 0 && f.nopaque > 0)
+				? mres.primitive_id : f.nopaque + mres.primitive_id;
+			hit = {mres.distance, float3(0), (int)tri,
+				mres.triangle_barycentric_coord, true};
 			if (any)
 				return (hit);
 		}
@@ -357,23 +437,74 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 {
 	float3 color = float3(0);
 	float3 weight = float3(1);
+	float cone = 0;
 
 	for (int depth = 0; depth <= MAX_DEPTH; depth++)
 	{
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
 			break ;
-		device const t_gpu_object &obj = objs[hit.id];
-		float3 n = normalize(hit.normal);
-		if (dot(n, d) > 0)
-			n = -n;
+		float3 n;
+		float3 ng;
+		float3 albedo;
+		float refl;
+		float spec;
 		float3 p = o + hit.t * d;
+		cone += hit.t;
+#ifdef HW_RT
+		if (hit.mesh)
+		{
+			device const t_gpu_tri &t = tris[hit.id];
+			float3 p0 = mesh_pos[hit.id * 3];
+			float3 p1 = mesh_pos[hit.id * 3 + 1];
+			float3 p2 = mesh_pos[hit.id * 3 + 2];
+			float3 cr = cross(p1 - p0, p2 - p0);
+			ng = normalize(cr);
+			if (dot(ng, d) > 0)
+				ng = -ng;
+			float2 b = hit.bary;
+			float3 ns = unpack_normal(t.n[0]) * (1 - b.x - b.y)
+				+ unpack_normal(t.n[1]) * b.x + unpack_normal(t.n[2]) * b.y;
+			n = length_squared(ns) > 1e-4f ? normalize(ns) : ng;
+			if (dot(n, ng) < 0)
+				n = -n;
+			device const GpuMaterial &m = mats[t.material];
+			albedo = m.kd.rgb;
+			if (m.flags & MAT_TEXTURE)
+			{
+				/*
+				** Nivel de mipmap por "cono de rayo": cuanto mas lejos y mas
+				** de canto, mas grande es la huella del pixel en la textura.
+				*/
+				float2 e1 = float2(t.uv[2] - t.uv[0], t.uv[3] - t.uv[1]);
+				float2 e2 = float2(t.uv[4] - t.uv[0], t.uv[5] - t.uv[1]);
+				float uv_area = fabs(e1.x * e2.y - e2.x * e1.y)
+					* m.diffuse.get_width() * m.diffuse.get_height();
+				float lod = 0.5f * log2(uv_area / max(length(cr), 1e-12f))
+					+ log2(cone * f.spread / max(fabs(dot(ng, d)), 0.1f));
+				albedo *= m.diffuse.sample(tex_sampler, tri_uv(t, b),
+					level(max(lod, 0.0f))).rgb;
+			}
+			refl = 0;
+			spec = MESH_SPECULAR;
+		}
+		else
+#endif
+		{
+			device const t_gpu_object &obj = objs[hit.id];
+			n = normalize(hit.normal);
+			if (dot(n, d) > 0)
+				n = -n;
+			ng = n;
+			albedo = obj.color.xyz;
+			refl = obj.reflect;
+			spec = SPECULAR;
+		}
 		/*
 		** El error de coma flotante crece con la distancia al origen: un
 		** desplazamiento fijo deja "acne" (puntos negros) en escenas grandes.
 		*/
-		p += n * EPSILON * max(1.0f, length(p) * 0.1f);
-		float3 albedo = obj.color.xyz;
+		p += ng * EPSILON * max(1.0f, length(p) * 0.1f);
 		float3 local = albedo * f.ambient.xyz;
 		bool shadows = max3(weight.x, weight.y, weight.z) >= SHADOW_MIN_WEIGHT;
 		for (int i = 0; i < f.nlights; i++)
@@ -388,12 +519,12 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 			local += albedo * lc * ndl;
 			float ndh = dot(n, normalize(l - d));
 			if (ndh > 0)
-				local += lc * SPECULAR * pow(ndh, SHININESS);
+				local += lc * spec * pow(ndh, SHININESS);
 		}
-		if (obj.reflect > 0 && depth < MAX_DEPTH)
+		if (refl > 0 && depth < MAX_DEPTH)
 		{
-			color += weight * (1 - obj.reflect) * local;
-			weight *= obj.reflect;
+			color += weight * (1 - refl) * local;
+			weight *= refl;
 			o = p;
 			d = reflect(d, n);
 		}
@@ -428,6 +559,11 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 #ifdef HW_RT
 					primitive_acceleration_structure accel [[buffer(3)]],
 					intersection_function_table<> table [[buffer(4)]],
+					primitive_acceleration_structure mesh_accel [[buffer(8)]],
+					intersection_function_table<triangle_data> mesh_table [[buffer(9)]],
+					device const t_gpu_tri *tris [[buffer(10)]],
+					device const GpuMaterial *mats [[buffer(11)]],
+					device const packed_float3 *mesh_pos [[buffer(12)]],
 #else
 					device const t_gpu_node *nodes [[buffer(3)]],
 #endif
