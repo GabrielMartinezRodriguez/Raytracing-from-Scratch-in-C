@@ -220,6 +220,12 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 
 	for (int i = 0; i < f.nplanes; i++)
 	{
+		/*
+		** Rayo de sombra que no cruza el plano: el plano no puede taparlo.
+		*/
+		if (any && dot(objs[i].b.xyz, o - objs[i].a.xyz)
+			* dot(objs[i].b.xyz, o + d * tmax - objs[i].a.xyz) > 0)
+			continue ;
 		t = hit_object(o, d, objs[i], normal);
 		if (t < hit.t)
 		{
