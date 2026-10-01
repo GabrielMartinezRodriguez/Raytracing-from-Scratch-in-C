@@ -12,6 +12,10 @@
 #define ITERS 3
 #define SUBSTEPS 4
 #define XSPH 0.02f
+#define COHESION 10.0f
+#define WALL_FRICTION 0.15f
+#define SURF_SCALE 1.5f
+#define SURF_ISO 0.3f
 
 static float	poly6(float r2, float h)
 {
@@ -218,6 +222,16 @@ void			fluid_step(t_fluid *f, t_world *w, float dt)
 			float vn = simd_dot(f->v[i], f->hitn[i]);
 			if (vn > 0)
 				f->v[i] -= f->hitn[i] * vn;
+			/*
+			** Rozamiento con la mesa: el agua "moja" la madera y no
+			** resbala como si fuera hielo.
+			*/
+			if (simd_length_squared(f->hitn[i]) > 0)
+			{
+				simd_float3 vt = f->v[i] - f->hitn[i] * simd_dot(f->v[i],
+					f->hitn[i]);
+				f->v[i] -= vt * WALL_FRICTION;
+			}
 		}
 		/*
 		** Viscosidad XSPH: cada particula se acerca a la velocidad media de
@@ -232,11 +246,27 @@ void			fluid_step(t_fluid *f, t_world *w, float dt)
 				dv += (f->v[j] - f->v[i]) * (poly6(simd_distance_squared(
 					f->p[i], f->p[j]), f->h) / f->rho0);
 			}
-			f->dp[i] = dv;
+			/*
+			** Cohesion (tension superficial, al estilo Akinci): las vecinas
+			** se atraen un poco a media distancia, asi el agua forma
+			** charcos y chorros continuos en vez de gotitas sueltas.
+			*/
+			simd_float3 coh = 0;
+			for (int k = 0; k < f->nnbr[i]; k++)
+			{
+				int j = f->nbr[i * MAX_NBR + k];
+				simd_float3 r = f->p[j] - f->p[i];
+				float len = simd_length(r);
+				if (len < 1e-9f)
+					continue ;
+				float q = len / f->h;
+				coh += r / len * (q * (1 - q) * (1 - q));
+			}
+			f->dp[i] = dv * XSPH + coh * (COHESION * h);
 		}
 		for (int i = 0; i < f->n; i++)
 		{
-			f->v[i] += f->dp[i] * XSPH;
+			f->v[i] += f->dp[i];
 			f->x[i] = f->p[i];
 		}
 		f->time += h;
@@ -249,6 +279,23 @@ void			fluid_step(t_fluid *f, t_world *w, float dt)
 ** en 6 tetraedros que comparten la diagonal 0-7, y cada tetraedro da 0, 1 o
 ** 2 triangulos segun que esquinas quedan dentro. No hace falta ninguna tabla.
 */
+
+/*
+** Densidad de una particula rodeada de agua en reposo con el nucleo de la
+** superficie (para que el campo valga 1 dentro del agua).
+*/
+
+static float	surf_rest(float d0, float hs)
+{
+	float	rho = 0;
+	int		n = (int)ceilf(hs / d0);
+
+	for (int z = -n; z <= n; z++)
+		for (int y = -n; y <= n; y++)
+			for (int x = -n; x <= n; x++)
+				rho += poly6(d0 * d0 * (x * x + y * y + z * z), hs);
+	return (rho);
+}
 
 static const int	g_tets[6][4] = {{0, 1, 3, 7}, {0, 1, 5, 7}, {0, 2, 3, 7},
 	{0, 2, 6, 7}, {0, 4, 5, 7}, {0, 4, 6, 7}};
@@ -306,7 +353,7 @@ static void		emit_tri(t_fluid *f, simd_float3 *v, simd_float3 *n,
 void			fluid_surface(t_fluid *f)
 {
 	t_grid	g;
-	float	iso = 0.5f;
+	float	iso = SURF_ISO;
 
 	f->ntri = 0;
 	if (f->n == 0)
@@ -318,8 +365,8 @@ void			fluid_surface(t_fluid *f)
 		hi = simd_max(hi, f->x[i]);
 	}
 	g.c = f->d0 * 0.7f;
-	g.lo = lo - f->h * 1.5f;
-	hi += f->h * 1.5f;
+	g.lo = lo - f->h * SURF_SCALE * 1.5f;
+	hi += f->h * SURF_SCALE * 1.5f;
 	/*
 	** Si el agua ocupa mucho (charcos en el suelo), la rejilla se hace mas
 	** gruesa para no pasar de ~40 millones de celdas.
@@ -334,7 +381,14 @@ void			fluid_surface(t_fluid *f)
 	if ((long)g.nx * g.ny * g.nz > 60000000L)
 		return ;
 	g.phi = calloc((size_t)g.nx * g.ny * g.nz, sizeof(float));
-	int rr = (int)ceilf(f->h / g.c);
+	/*
+	** Para la superficie se usa un nucleo mas ancho que en la simulacion:
+	** una lamina fina de agua (una o dos particulas de grosor) sigue dando
+	** una capa continua en vez de gotas sueltas.
+	*/
+	float hs = f->h * SURF_SCALE;
+	float rho_s = surf_rest(f->d0, hs);
+	int rr = (int)ceilf(hs / g.c);
 	for (int i = 0; i < f->n; i++)
 	{
 		simd_float3 q = (f->x[i] - g.lo) / g.c;
@@ -347,8 +401,8 @@ void			fluid_surface(t_fluid *f)
 						|| z >= g.nz)
 						continue ;
 					simd_float3 pos = g.lo + simd_make_float3(x, y, z) * g.c;
-					float w = poly6(simd_distance_squared(pos, f->x[i]), f->h);
-					g.phi[(z * g.ny + y) * g.nx + x] += w / f->rho0;
+					float w = poly6(simd_distance_squared(pos, f->x[i]), hs);
+					g.phi[(z * g.ny + y) * g.nx + x] += w / rho_s;
 				}
 	}
 	for (int z = 0; z < g.nz - 1; z++)

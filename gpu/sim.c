@@ -14,7 +14,7 @@
 enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA, SIM_ROTURA,
 	SIM_LIQUIDO };
 
-#define FLUID_TRIS 220000
+#define FLUID_TRIS 450000
 
 #define SHARDS 14
 
@@ -226,11 +226,11 @@ static void		fluid_setup(t_sim *s, t_gpu_mesh *m)
 {
 	t_fluid	*f = &s->fluid;
 
-	fluid_init(f, 0.012f, 14000);
+	fluid_init(f, 0.012f, 30000);
 	f->emit_pos = simd_make_float3(0.15f, 1.6f, -0.05f);
 	f->emit_vel = simd_make_float3(0, -1.2f, 0);
-	f->emit_radius = 0.025f;
-	f->emit_until = 4.0f;
+	f->emit_radius = 0.04f;
+	f->emit_until = 5.0f;
 	f->tri_cap = FLUID_TRIS;
 	f->tri = malloc(sizeof(float) * 9 * f->tri_cap);
 	f->tri_n = malloc(sizeof(unsigned) * 3 * f->tri_cap);

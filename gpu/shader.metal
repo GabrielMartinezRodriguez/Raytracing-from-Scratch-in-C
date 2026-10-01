@@ -738,6 +738,17 @@ static float	rand01(uint seed)
 }
 
 /*
+** Caminos que rebotan en algo difuso y luego atraviesan el agua (causticas)
+** dan puntos muy brillantes y raros: se recortan para que no salgan
+** "chispas" en la imagen.
+*/
+
+static float3	clip_caustic(float3 c, bool caustic)
+{
+	return (caustic ? min(c, float3(1.5f)) : c);
+}
+
+/*
 ** Sombra con superficies transparentes (agua): el rayo hacia la luz
 ** atraviesa el material dielectrico perdiendo un poco en cada cara y solo
 ** lo para algo opaco. Sin agua en la escena, un rayo "cualquier impacto".
@@ -935,6 +946,7 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 	first_rough = 1;
 	int		depth = 0;
 	bool	inside = false;
+	bool	caustic = false;
 	/*
 	** "depth" cuenta solo los rebotes en superficies normales; atravesar
 	** agua (entrar, salir, reflejarse en ella) no gasta rebotes, hasta un
@@ -945,8 +957,8 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
 		{
-			color += weight * sky(d, f, env_map) * (depth == 0 || f.env.y > 0
-				? 1.0f : SKY_LIGHT);
+			color += clip_caustic(weight * sky(d, f, env_map) * (depth == 0
+				|| f.env.y > 0 ? 1.0f : SKY_LIGHT), caustic);
 			break ;
 		}
 		if (inside)
@@ -988,9 +1000,10 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 				sp.pbr = true;
 				sp.n = ns;
 				sp.p = hp + nn * sc;
-				color += weight * direct_light(sp, d, true, f, objs, lights,
-					ACCEL_ARGS, seed + event * 7919);
+				color += clip_caustic(weight * direct_light(sp, d, true, f, objs,
+					lights, ACCEL_ARGS, seed + event * 7919), caustic);
 			}
+			caustic = caustic || depth > 0;
 			float cosi = clamp(-dot(d, ns), 0.0f, 1.0f);
 			float fr = 0.02f + 0.98f * pow(1 - cosi, 5.0f);
 			float3 rd = refract(d, ns, entering ? 1 / 1.33f : 1.33f);
@@ -1008,8 +1021,8 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 			}
 			continue ;
 		}
-		color += weight * direct_light(s, d, true, f, objs, lights, ACCEL_ARGS,
-			seed + event * 7919);
+		color += clip_caustic(weight * direct_light(s, d, true, f, objs, lights,
+			ACCEL_ARGS, seed + event * 7919), caustic);
 		if (depth == GI_BOUNCES)
 			break ;
 		depth++;
