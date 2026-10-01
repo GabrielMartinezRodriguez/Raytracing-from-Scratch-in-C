@@ -55,10 +55,21 @@ static t_vec4		vec4(simd_float3 v)
 - (void)encodeTemporalTo:(id<MTLTexture>)texture scale:(float)scale buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w h:(NSUInteger)h usage:(MTLTextureUsage)usage;
 - (void)encodeGITo:(id<MTLTexture>)texture scale:(float)scale buffer:(id<MTLCommandBuffer>)cmd;
+- (void)giReferenceAt:(float)t samples:(int)spp size:(MTLSize)size name:(const char *)name;
+- (void)encodePass:(int)pass to:(id<MTLTexture>)texture base:(id<MTLTexture>)base buffer:(id<MTLCommandBuffer>)cmd;
 - (void)cameraMatrices:(simd_float4x4 *)view proj:(simd_float4x4 *)proj aspect:(float)aspect;
 - (t_gpu_frame)frame;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
+
+static void		save_png(id<MTLTexture> texture, const char *name);
+
+static float	aces(float x)
+{
+	float v = (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
+
+	return (v < 0 ? 0 : v > 1 ? 1 : v);
+}
 
 @implementation Renderer
 {
@@ -112,6 +123,7 @@ static t_vec4		vec4(simd_float3 v)
 	bool						_keys[256];
 	bool						_fast;
 	bool						_hardware;
+	bool						_city;
 	CFTimeInterval				_last;
 	CFTimeInterval				_fpsStart;
 	int							_frames;
@@ -138,9 +150,10 @@ static t_vec4		vec4(simd_float3 v)
 	options.mathMode = MTLMathModeFast;
 	_hardware = _device.supportsRaytracing && !(getenv("RT_HW")
 		&& strcmp(getenv("RT_HW"), "0") == 0);
-	library = [_device newLibraryWithSource:[NSString stringWithFormat:@"%s%s",
-		_hardware ? "#define HW_RT 1\n" : "", g_shader_src] options:options
-		error:&error];
+	_city = getenv("RT_CITY") && atoi(getenv("RT_CITY")) > 1;
+	library = [_device newLibraryWithSource:[NSString stringWithFormat:@"%s%s%s",
+		_hardware ? "#define HW_RT 1\n" : "", _city ? "#define MESH_INST 1\n"
+		: "", g_shader_src] options:options error:&error];
 	if (!library)
 	{
 		fprintf(stderr, "error compilando el shader:\n%s\n",
@@ -513,7 +526,7 @@ static bool		has_transparency(CGImageRef img)
 	float			sz = mesh->size.z * 1.02f;
 	float			step = fmaxf(sx, sz);
 
-	n = n < 1 ? 1 : n;
+	n = (n < 1 || !_city) ? 1 : n;
 	_ninsts = n * n;
 	_insts = [_device newBufferWithLength:sizeof(simd_float4) * _ninsts
 		options:MTLResourceStorageModeShared];
@@ -546,6 +559,11 @@ static bool		has_transparency(CGImageRef img)
 		d[i].transformationMatrix.columns[1] = MTLPackedFloat3Make(0, 1, 0);
 		d[i].transformationMatrix.columns[2] = MTLPackedFloat3Make(s, 0, c);
 		d[i].transformationMatrix.columns[3] = MTLPackedFloat3Make(tx, 0, tz);
+	}
+	if (!_city)
+	{
+		_meshAccel = _meshPrim;
+		return ;
 	}
 	MTLInstanceAccelerationStructureDescriptor *idesc =
 		[MTLInstanceAccelerationStructureDescriptor descriptor];
@@ -946,6 +964,60 @@ static bool		has_transparency(CGImageRef img)
 	[self encodePass:5 to:texture base:_gOut buffer:cmd];
 }
 
+- (void)giReferenceAt:(float)t samples:(int)spp size:(MTLSize)size
+	name:(const char *)name
+{
+	size_t			w = size.width;
+	size_t			h = size.height;
+	MTLTextureDescriptor *td = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+		width:w height:h mipmapped:NO];
+	td.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+	td.storageMode = MTLStorageModeShared;
+	id<MTLTexture>	acc = [_device newTextureWithDescriptor:td];
+	id<MTLTexture>	dummy = [self offscreenTexture];
+	float			*sum = calloc(w * h * 4, sizeof(float));
+	float			*px = malloc(w * h * 4 * sizeof(float));
+	CFTimeInterval	t0 = CACurrentMediaTime();
+
+	if (!_denoiser || _denoiser.outputWidth != w)
+	{
+		id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+		[self encodeGITo:dummy scale:1 buffer:cmd];
+		[cmd commit];
+		[cmd waitUntilCompleted];
+	}
+	for (int s = 0; s < spp; s++)
+	{
+		[self pathAt:t frame:1000 + s];
+		id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+		[self encodePass:4 to:acc base:acc buffer:cmd];
+		[cmd commit];
+		[cmd waitUntilCompleted];
+		[acc getBytes:px bytesPerRow:w * 16 fromRegion:MTLRegionMake2D(0, 0,
+			w, h) mipmapLevel:0];
+		for (size_t i = 0; i < w * h * 4; i++)
+			sum[i] += px[i];
+	}
+	uint8_t *out = malloc(w * h * 4);
+	for (size_t i = 0; i < w * h; i++)
+	{
+		for (int c = 0; c < 3; c++)
+			out[i * 4 + 2 - c] = (uint8_t)(powf(aces(sum[i * 4 + c] / spp),
+				1 / 2.2f) * 255 + 0.5f);
+		out[i * 4 + 3] = 255;
+	}
+	id<MTLTexture> img = [self offscreenTexture];
+	[img replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0
+		withBytes:out bytesPerRow:w * 4];
+	save_png(img, name);
+	printf("referencia %s: %d muestras en %.1f s\n", name, spp,
+		CACurrentMediaTime() - t0);
+	free(sum);
+	free(px);
+	free(out);
+}
+
 - (id<MTLTexture>)privateTexture:(MTLPixelFormat)fmt w:(NSUInteger)w
 	h:(NSUInteger)h usage:(MTLTextureUsage)usage
 {
@@ -1222,6 +1294,28 @@ static void		render_video(Renderer *renderer, int n, const char *out, int fps)
 		CACurrentMediaTime() - t0);
 }
 
+/*
+** --giref N prefijo muestras: referencia "perfecta" de la iluminacion
+** global en las 3 imagenes de control del recorrido de N imagenes. Acumula
+** muestras sin denoiser (cada una con rayos y jitter distintos) y aplica el
+** mismo tonemapping que la version real.
+*/
+
+static void		gi_reference(Renderer *renderer, int n, const char *prefix,
+					int spp)
+{
+	id<MTLTexture>	texture = [renderer offscreenTexture];
+	int				checks[3] = {n / 3, 2 * n / 3, n - 1};
+	char			name[1100];
+
+	for (int k = 0; k < 3; k++)
+	{
+		snprintf(name, sizeof(name), "%s_f%03d", prefix, checks[k]);
+		[renderer giReferenceAt:(float)checks[k] / (n - 1) samples:spp
+			size:MTLSizeMake(texture.width, texture.height, 1) name:name];
+	}
+}
+
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 {
 	NSApplication	*app = [NSApplication sharedApplication];
@@ -1328,6 +1422,8 @@ int				main(int argc, char **argv)
 			printf("render: %.2f ms\n", [renderer renderOnce:texture]);
 			save_png(texture, argc >= 4 ? argv[3] : "scene");
 		}
+		else if (argc >= 6 && strcmp(argv[2], "--giref") == 0)
+			gi_reference(renderer, atoi(argv[3]), argv[4], atoi(argv[5]));
 		else if (argc >= 5 && strcmp(argv[2], "--video") == 0)
 			render_video(renderer, atoi(argv[3]), argv[4],
 				argc >= 6 ? atoi(argv[5]) : 30);
