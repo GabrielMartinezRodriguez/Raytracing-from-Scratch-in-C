@@ -68,6 +68,8 @@ constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
 constant int	GI_BOUNCES = 2;
+constant int	MAX_EVENTS = 12;
+constant float3	WATER_SIGMA = float3(0.9f, 0.25f, 0.12f);
 constant int	GI_SHADOW_BOUNCES = 3;
 constant float	BOUNCE_LOD_BIAS = 3.0f;
 constant float	CLIP_NEAR = 0.05f;
@@ -567,6 +569,8 @@ struct			Surf
 	float		rough;
 	float		metal;
 	bool		pbr;
+	bool		glass;
+	float3		ng_raw;
 };
 
 /*
@@ -595,6 +599,7 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 		float3 p2 = inst_point(mesh_pos[hit.id * 3 + 2], it);
 		float3 cr = cross(p1 - p0, p2 - p0);
 		s.ng = normalize(cr);
+		s.ng_raw = s.ng;
 		if (dot(s.ng, d) > 0)
 			s.ng = -s.ng;
 		float2 b = hit.bary;
@@ -605,6 +610,7 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 			s.n = -s.n;
 		device const GpuMaterial &m = mats[t.material];
 		s.albedo = m.kd.rgb;
+		s.glass = (m.flags & MAT_GLASS) != 0;
 		s.rough = m.roughness;
 		s.metal = m.metallic;
 		s.pbr = true;
@@ -674,6 +680,8 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 		s.rough = 1;
 		s.metal = 0;
 		s.pbr = false;
+		s.glass = false;
+		s.ng_raw = s.n;
 	}
 	/*
 	** El error de coma flotante crece con la distancia al origen: un
@@ -730,6 +738,39 @@ static float	rand01(uint seed)
 }
 
 /*
+** Sombra con superficies transparentes (agua): el rayo hacia la luz
+** atraviesa el material dielectrico perdiendo un poco en cada cara y solo
+** lo para algo opaco. Sin agua en la escena, un rayo "cualquier impacto".
+*/
+
+static float3	shadow_trans(float3 p, float3 l, float dist,
+					constant t_gpu_frame &f, device const t_gpu_object *objs,
+					ACCEL_DECL)
+{
+	if (f.extra.y <= 0)
+		return (intersect(p, l, f, objs, ACCEL_ARGS, dist, true).id < 0
+			? float3(1) : float3(0));
+	float3 tr = float3(1);
+	for (int k = 0; k < 8; k++)
+	{
+		Hit h = intersect(p, l, f, objs, ACCEL_ARGS, dist, false);
+		if (h.id < 0)
+			return (tr);
+#ifdef HW_RT
+		if (!h.mesh || !(mats[tris[h.id].material].flags & MAT_GLASS))
+			return (float3(0));
+#else
+		return (float3(0));
+#endif
+		tr *= 0.92f;
+		float adv = h.t + 1e-3f;
+		p += l * adv;
+		dist -= adv;
+	}
+	return (tr);
+}
+
+/*
 ** Luz directa: lamparas del .rt y, si hay HDRI, el sol como un disco con su
 ** tamano real: cada rayo de sombra apunta a un punto al azar del disco, y
 ** de ahi salen las sombras con penumbra.
@@ -749,10 +790,13 @@ static float3	direct_light(Surf s, float3 d, bool shadows,
 		float dist = length(tolight);
 		float3 l = tolight / dist;
 		float ndl = dot(s.n, l);
-		if (ndl <= 0 || (shadows
-			&& intersect(s.p, l, f, objs, ACCEL_ARGS, dist, true).id >= 0))
+		if (ndl <= 0)
 			continue ;
-		float3 lc = lights[i].color.xyz;
+		float3 vis = shadows ? shadow_trans(s.p, l, dist, f, objs, ACCEL_ARGS)
+			: float3(1);
+		if (max3(vis.x, vis.y, vis.z) <= 0)
+			continue ;
+		float3 lc = lights[i].color.xyz * vis;
 		if (s.pbr)
 		{
 			local += lc * ndl * brdf_pi(s, v, l);
@@ -776,10 +820,13 @@ static float3	direct_light(Surf s, float3 d, bool shadows,
 		float3	l = normalize(w * ct + t * (st * cos(2 * M_PI_F * u2))
 			+ b * (st * sin(2 * M_PI_F * u2)));
 		float	ndl = dot(s.n, l);
-		if (ndl > 0 && dot(s.ng, l) > 0 && (!shadows
-			|| intersect(s.p, l, f, objs, ACCEL_ARGS, NOHIT, true).id < 0))
-			local += f.sun_color.rgb * ndl * (s.pbr ? brdf_pi(s, v, l)
+		if (ndl > 0 && dot(s.ng, l) > 0)
+		{
+			float3 vis = shadows ? shadow_trans(s.p, l, NOHIT, f, objs,
+				ACCEL_ARGS) : float3(1);
+			local += f.sun_color.rgb * vis * ndl * (s.pbr ? brdf_pi(s, v, l)
 				: s.albedo);
+		}
 	}
 	return (local);
 }
@@ -886,7 +933,14 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 	first_normal = float3(0, 0, 1);
 	first_spec = float3(0.04f);
 	first_rough = 1;
-	for (int depth = 0; depth <= GI_BOUNCES; depth++)
+	int		depth = 0;
+	bool	inside = false;
+	/*
+	** "depth" cuenta solo los rebotes en superficies normales; atravesar
+	** agua (entrar, salir, reflejarse en ella) no gasta rebotes, hasta un
+	** maximo de eventos.
+	*/
+	for (int event = 0; event < MAX_EVENTS && depth <= GI_BOUNCES; event++)
 	{
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
@@ -895,6 +949,8 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 				? 1.0f : SKY_LIGHT);
 			break ;
 		}
+		if (inside)
+			weight *= exp(-WATER_SIGMA * hit.t);
 		cone += hit.t;
 		/*
 		** La luz rebotada no necesita texturas nitidas: en los rebotes se lee
@@ -903,7 +959,7 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 		Surf s = surface(hit, o, d, cone, f, objs, ACCEL_ARGS,
 			depth > 0 ? BOUNCE_LOD_BIAS : 0.0f);
 		float3 f0 = mix(float3(0.04f), s.albedo, s.metal);
-		if (depth == 0)
+		if (event == 0)
 		{
 			first_t = hit.t;
 			first_albedo = s.albedo * (1 - s.metal);
@@ -911,19 +967,61 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 			first_spec = f0;
 			first_rough = s.rough;
 		}
+		if (s.glass)
+		{
+			/*
+			** Agua: brillo del sol en la superficie y, segun Fresnel,
+			** reflexion o refraccion (indice 1,33). Dentro, la luz se
+			** absorbe un poco (Beer-Lambert, algo mas el rojo).
+			*/
+			float3 hp = o + hit.t * d;
+			float sc = EPSILON * max(1.0f, length(hp) * 0.1f);
+			bool entering = dot(d, s.ng_raw) < 0;
+			float3 nn = entering ? s.ng_raw : -s.ng_raw;
+			float3 ns = dot(s.n, nn) > 0 ? s.n : -s.n;
+			if (!inside)
+			{
+				Surf sp = s;
+				sp.albedo = float3(0);
+				sp.metal = 0;
+				sp.rough = 0.04f;
+				sp.pbr = true;
+				sp.n = ns;
+				sp.p = hp + nn * sc;
+				color += weight * direct_light(sp, d, true, f, objs, lights,
+					ACCEL_ARGS, seed + event * 7919);
+			}
+			float cosi = clamp(-dot(d, ns), 0.0f, 1.0f);
+			float fr = 0.02f + 0.98f * pow(1 - cosi, 5.0f);
+			float3 rd = refract(d, ns, entering ? 1 / 1.33f : 1.33f);
+			if (length_squared(rd) < 1e-8f
+				|| rand01(seed * 23 + event * 41 + 9) < fr)
+			{
+				d = reflect(d, ns);
+				o = hp + nn * sc;
+			}
+			else
+			{
+				d = normalize(rd);
+				o = hp - nn * sc;
+				inside = entering;
+			}
+			continue ;
+		}
 		color += weight * direct_light(s, d, true, f, objs, lights, ACCEL_ARGS,
-			seed + depth * 7919);
+			seed + event * 7919);
 		if (depth == GI_BOUNCES)
 			break ;
+		depth++;
 		float3 v = -d;
 		float ps = s.pbr ? clamp(mix(0.15f, 1.0f, s.metal) * (1.2f
 			- s.rough), 0.1f, 0.95f) : 0.0f;
 		o = s.p;
-		if (rand01(seed * 19 + depth * 31 + 5) < ps)
+		if (rand01(seed * 19 + event * 31 + 5) < ps)
 		{
 			float3 h;
 			float a = s.rough * s.rough;
-			d = ggx_dir(s.n, v, a, seed + depth * 4513, h);
+			d = ggx_dir(s.n, v, a, seed + event * 4513, h);
 			float nl = dot(s.n, d);
 			float nv = max(dot(s.n, v), 1e-4f);
 			if (nl <= 0 || dot(d, s.ng) <= 0)
@@ -934,7 +1032,7 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 		}
 		else
 		{
-			d = cosine_dir(s.n, seed + depth * 7919);
+			d = cosine_dir(s.n, seed + event * 7919);
 			if (dot(d, s.ng) <= 0)
 				break ;
 			weight *= s.albedo * (1 - s.metal) * (s.pbr ? 1 - fresnel(f0,

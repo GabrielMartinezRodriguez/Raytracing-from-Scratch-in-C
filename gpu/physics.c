@@ -328,6 +328,77 @@ float			world_push_point(t_world *w, simd_float3 *p, float r,
 }
 
 /*
+** Primer triangulo estatico que corta el segmento a-b (y el suelo
+** infinito). Sirve para que lo rapido y pequeno no atraviese superficies
+** finas entre dos pasos.
+*/
+
+int				world_segment(t_world *w, simd_float3 a, simd_float3 b,
+					float *t, simd_float3 *normal)
+{
+	simd_float3	d = b - a;
+	float		best = 2;
+	int			i0[3], i1[3];
+
+	if (w->has_ground && a.y >= w->ground_y && b.y < w->ground_y)
+	{
+		best = (a.y - w->ground_y) / (a.y - b.y);
+		*normal = simd_make_float3(0, 1, 0);
+	}
+	if (w->ntris)
+	{
+		simd_float3 mn = simd_min(a, b), mx = simd_max(a, b);
+		for (int k = 0; k < 3; k++)
+		{
+			i0[k] = (int)floorf((mn[k] - w->gmin[k]) / w->cell);
+			i1[k] = (int)floorf((mx[k] - w->gmin[k]) / w->cell);
+			i0[k] = i0[k] < 0 ? 0 : i0[k];
+			i1[k] = i1[k] >= w->gdim[k] ? w->gdim[k] - 1 : i1[k];
+		}
+		w->stamp_id++;
+		for (int z = i0[2]; z <= i1[2]; z++)
+			for (int y = i0[1]; y <= i1[1]; y++)
+				for (int x = i0[0]; x <= i1[0]; x++)
+				{
+					int id = (z * w->gdim[1] + y) * w->gdim[0] + x;
+					for (int k = w->cell_start[id]; k < w->cell_start[id + 1];
+						k++)
+					{
+						int tr = w->cell_items[k];
+						if (w->stamp[tr] == w->stamp_id)
+							continue ;
+						w->stamp[tr] = w->stamp_id;
+						const float *tp = w->tris + tr * 9;
+						simd_float3 p0 = v3(tp);
+						simd_float3 e1 = v3(tp + 3) - p0, e2 = v3(tp + 6) - p0;
+						simd_float3 pv = simd_cross(d, e2);
+						float det = simd_dot(e1, pv);
+						if (fabsf(det) < 1e-14f)
+							continue ;
+						simd_float3 tv = a - p0;
+						float u = simd_dot(tv, pv) / det;
+						if (u < 0 || u > 1)
+							continue ;
+						simd_float3 qv = simd_cross(tv, e1);
+						float v = simd_dot(d, qv) / det;
+						if (v < 0 || u + v > 1)
+							continue ;
+						float tt = simd_dot(e2, qv) / det;
+						if (tt < 0 || tt > 1 || tt >= best)
+							continue ;
+						best = tt;
+						simd_float3 fn = simd_normalize(simd_cross(e1, e2));
+						*normal = simd_dot(fn, d) < 0 ? fn : -fn;
+					}
+				}
+	}
+	if (best > 1)
+		return (0);
+	*t = best;
+	return (1);
+}
+
+/*
 ** Pares de esferas cercanas de cuerpos distintos con una tabla hash
 ** espacial (celda = diametro de la esfera mas grande).
 */

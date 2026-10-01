@@ -2,6 +2,7 @@
 # define SIM_H
 # include "obj_loader.h"
 # include "physics.h"
+# include "fluid.h"
 
 /*
 ** Escenarios animados sobre un modelo .obj: que objetos son cuerpos
@@ -50,6 +51,8 @@ typedef struct	s_sim
 	simd_float3	vase_vel;
 	float		**shard_tris;
 	int			*shard_ntris;
+	t_fluid		fluid;
+	int			fluid_obj;
 }				t_sim;
 
 int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *mesh);

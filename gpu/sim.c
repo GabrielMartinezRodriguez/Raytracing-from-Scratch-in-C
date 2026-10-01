@@ -11,7 +11,10 @@
 #include <string.h>
 #include "sim.h"
 
-enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA, SIM_ROTURA };
+enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA, SIM_ROTURA,
+	SIM_LIQUIDO };
+
+#define FLUID_TRIS 220000
 
 #define SHARDS 14
 
@@ -214,6 +217,53 @@ static void		static_world(t_sim *s, t_gpu_mesh *m)
 static void		cloth_setup(t_sim *s, t_gpu_mesh *m);
 
 /*
+** Agua que cae en chorro sobre la mesa: material dielectrico (kd.w = 1) y
+** FLUID_TRIS triangulos reservados en la malla para su superficie, que se
+** rellenan cada imagen (los que sobran quedan degenerados, sin area).
+*/
+
+static void		fluid_setup(t_sim *s, t_gpu_mesh *m)
+{
+	t_fluid	*f = &s->fluid;
+
+	fluid_init(f, 0.012f, 14000);
+	f->emit_pos = simd_make_float3(0.15f, 1.6f, -0.05f);
+	f->emit_vel = simd_make_float3(0, -1.2f, 0);
+	f->emit_radius = 0.025f;
+	f->emit_until = 4.0f;
+	f->tri_cap = FLUID_TRIS;
+	f->tri = malloc(sizeof(float) * 9 * f->tri_cap);
+	f->tri_n = malloc(sizeof(unsigned) * 3 * f->tri_cap);
+	m->mats = realloc(m->mats, sizeof(t_mesh_material) * (m->nmats + 1));
+	t_mesh_material *mat = &m->mats[m->nmats];
+	memset(mat, 0, sizeof(*mat));
+	snprintf(mat->name, sizeof(mat->name), "agua");
+	mat->kd = simd_make_float4(1, 1, 1, 1);
+	mat->roughness = 0.03f;
+	int material = m->nmats++;
+	s->fluid_obj = m->nobjs;
+	m->obj_names = realloc(m->obj_names, 64 * (m->nobjs + 1));
+	snprintf(m->obj_names[m->nobjs++], 64, "agua");
+	if (m->ntris + FLUID_TRIS > m->cap)
+	{
+		m->cap = m->ntris + FLUID_TRIS;
+		m->pos = realloc(m->pos, sizeof(float) * 9 * m->cap);
+		m->tris = realloc(m->tris, sizeof(t_gpu_tri) * m->cap);
+		m->tri_obj = realloc(m->tri_obj, sizeof(uint32_t) * m->cap);
+	}
+	for (int i = 0; i < FLUID_TRIS; i++)
+	{
+		for (int k = 0; k < 9; k++)
+			m->pos[m->ntris * 9 + k] = k % 3 == 1 ? -50.0f : 0.0f;
+		memset(&m->tris[m->ntris], 0, sizeof(t_gpu_tri));
+		m->tris[m->ntris].material = material;
+		m->tri_obj[m->ntris++] = s->fluid_obj;
+	}
+	printf("agua: densidad de reposo %.0f, hasta %d particulas y %d "
+		"triangulos de superficie\n", f->rho0, f->cap, FLUID_TRIS);
+}
+
+/*
 ** Prefractura del jarron: SHARDS puntos al azar dentro de su caja y cada
 ** triangulo va al punto mas cercano (diagrama de Voronoi). Cada trozo pasa a
 ** ser un objeto propio de la malla; mientras el jarron esta entero, todos
@@ -386,11 +436,12 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 		: strcmp(name, "lluvia") == 0 ? SIM_LLUVIA
 		: strcmp(name, "viento") == 0 ? SIM_VIENTO
 		: strcmp(name, "tela") == 0 ? SIM_TELA
-		: strcmp(name, "rotura") == 0 ? SIM_ROTURA : SIM_NONE;
+		: strcmp(name, "rotura") == 0 ? SIM_ROTURA
+		: strcmp(name, "liquido") == 0 ? SIM_LIQUIDO : SIM_NONE;
 	if (s->kind == SIM_NONE)
 	{
 		fprintf(stderr, "error: escenario desconocido '%s' (frutas, lluvia, "
-			"viento, tela, rotura)\n", name);
+			"viento, tela, rotura, liquido)\n", name);
 		return (-1);
 	}
 	if (s->kind == SIM_LLUVIA)
@@ -414,7 +465,8 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 		const t_kind *k = kind_of(m->obj_names[i]);
 		if (s->kind == SIM_ROTURA && starts(m->obj_names[i], "vasija_trozo"))
 			continue ;
-		if (k && s->kind != SIM_VIENTO && s->kind != SIM_TELA)
+		if (k && s->kind != SIM_VIENTO && s->kind != SIM_TELA
+			&& s->kind != SIM_LIQUIDO)
 			make_body(s, m, i, k);
 	}
 	static_world(s, m);
@@ -422,6 +474,8 @@ int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *m)
 	t_world *w = &s->w;
 	if (s->kind == SIM_ROTURA)
 		vase_setup(s, m);
+	if (s->kind == SIM_LIQUIDO)
+		fluid_setup(s, m);
 	if (s->kind == SIM_VIENTO)
 		s->wind = 1.0f;
 	else if (s->kind == SIM_TELA)
@@ -720,6 +774,11 @@ void			sim_advance(t_sim *s, float dt)
 		maybe_break(s);
 	if (s->cloth.n)
 		cloth_step(s, dt);
+	if (s->fluid.cap)
+	{
+		fluid_step(&s->fluid, &s->w, dt);
+		fluid_surface(&s->fluid);
+	}
 	s->time += dt;
 }
 
@@ -768,10 +827,22 @@ void			sim_apply(t_sim *s, const uint32_t *tri_obj,
 					float *pos, t_gpu_tri *tris, size_t n)
 {
 	size_t	cloth_tri = 0;
+	int		fluid_tri = 0;
 
 	for (size_t i = 0; i < n; i++)
 	{
 		uint32_t o = tri_obj[i];
+		if (s->fluid.cap && (int)o == s->fluid_obj)
+		{
+			t_fluid *f = &s->fluid;
+			int k = fluid_tri++;
+			for (int c = 0; c < 9; c++)
+				pos[i * 9 + c] = k < f->ntri ? f->tri[k * 9 + c]
+					: (c % 3 == 1 ? -50.0f : 0.0f);
+			for (int c = 0; c < 3; c++)
+				tris[i].n[c] = k < f->ntri ? f->tri_n[k * 3 + c] : 0;
+			continue ;
+		}
 		if (s->cloth.n && (int)o == s->cloth.obj)
 		{
 			/*

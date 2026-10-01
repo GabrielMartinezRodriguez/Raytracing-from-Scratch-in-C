@@ -78,6 +78,7 @@ typedef struct	s_gpu_tri
 # define MAT_NORMAL 4
 # define MAT_ROUGH 8
 # define MAT_METAL 16
+# define MAT_GLASS 32
 
 typedef struct	s_gpu_light
 {
