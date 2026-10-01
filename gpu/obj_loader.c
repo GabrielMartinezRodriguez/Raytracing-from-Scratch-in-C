@@ -399,7 +399,12 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 			GROW(obj.vt, obj.nvt, obj.capvt);
 			float u = parse_float(&q, end);
 			float v = parse_float(&q, end);
-			obj.vt[obj.nvt++] = simd_make_float2(u, v);
+			/*
+			** El .obj mide v desde abajo y la GPU lee las texturas desde
+			** arriba: sin darle la vuelta, cada parte del modelo leia la
+			** region equivocada de su textura.
+			*/
+			obj.vt[obj.nvt++] = simd_make_float2(u, 1 - v);
 		}
 		else if (p[0] == 'v' && p[1] == 'n')
 		{
@@ -455,7 +460,7 @@ typedef struct	s_cache_header
 	int32_t		pad;
 }				t_cache_header;
 
-static const char	g_magic[8] = "RTMESH2";
+static const char	g_magic[8] = "RTMESH3";
 
 static void			obj_stat(const char *path, uint64_t *size, int64_t *mtime)
 {

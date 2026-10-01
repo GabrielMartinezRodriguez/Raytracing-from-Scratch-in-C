@@ -663,7 +663,8 @@ static bool		has_transparency(CGImageRef img)
 	simd_float3 world = simd_make_float3(c * dir[0] - s * dir[2], dir[1],
 		s * dir[0] + c * dir[2]);
 	_sunDir = simd_make_float4(simd_normalize(world), cosr);
-	_sunColor = simd_make_float4(col[0] / M_PI, col[1] / M_PI, col[2] / M_PI, 1);
+	_sunColor = simd_make_float4(col[0] / M_PI, col[1] / M_PI, col[2] / M_PI,
+		getenv("RT_NOSUN") ? 0 : 1);
 	_env = simd_make_float4(1, 1, th, ev);
 	float *rgba = malloc(sizeof(float) * 4 * img.w * img.h);
 	for (int i = 0; i < img.w * img.h; i++)
@@ -746,6 +747,7 @@ static bool		has_transparency(CGImageRef img)
 	f.sun_dir = _sunDir;
 	f.sun_color = _sunColor;
 	f.env = _env;
+	f.pad = getenv("RT_GUIDES") ? atoi(getenv("RT_GUIDES")) : 0;
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;
@@ -1087,7 +1089,8 @@ static bool		has_transparency(CGImageRef img)
 	if (!getenv("RT_SKIP_DENOISE"))
 		[_denoiser encodeToCommandBuffer:cmd];
 	_hasPrev = true;
-	[self encodePass:5 to:texture base:_gOut buffer:cmd];
+	[self encodePass:5 to:texture base:(getenv("RT_SKIP_DENOISE") ? _gColor
+		: _gOut) buffer:cmd];
 }
 
 - (void)giReferenceAt:(float)t samples:(int)spp size:(MTLSize)size

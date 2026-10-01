@@ -1023,8 +1023,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 		out.write(float4(c * (f.env.y > 0 ? f.env.w : GI_EXPOSURE), 1), gid);
 		albedo_out.write(float4(alb, 1), gid);
 		normal_out.write(float4(nrm, 0), gid);
-		rough_out.write(float4(rgh), gid);
-		spec_out.write(float4(spc, 1), gid);
+		rough_out.write(float4(f.pad == 1 ? 0.9f : rgh), gid);
+		spec_out.write(float4(f.pad == 1 ? float3(0.04f) : spc, 1), gid);
 		float3 world = f.origin.xyz + d * min(first_t, 1e5f);
 		float3 v = world - f.prev_origin.xyz;
 		float z = dot(v, f.prev_forward.xyz);
