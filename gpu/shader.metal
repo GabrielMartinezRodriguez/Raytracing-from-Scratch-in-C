@@ -49,7 +49,13 @@ static float	hit_sphere(float3 o, float3 d, float3 c, float r)
 {
 	float3 oc = o - c;
 	float b = dot(oc, d);
-	float h = b * b - (dot(oc, oc) - r * r);
+	/*
+	** Forma estable (Ray Tracing Gems, cap. 7): en vez de b^2 - |oc|^2,
+	** que resta dos numeros enormes lejos del origen, se usa la distancia
+	** del centro al rayo.
+	*/
+	float3 qc = oc - b * d;
+	float h = r * r - dot(qc, qc);
 
 	if (h < 0)
 		return (NOHIT);
