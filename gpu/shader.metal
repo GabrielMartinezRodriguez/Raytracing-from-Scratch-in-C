@@ -23,6 +23,7 @@ constant float	SPECULAR = 0.4;
 constant float	SHININESS = 60;
 constant float	GAMMA = 2.2;
 constant float	EPSILON = 1e-3;
+constant float	EDGE = 0.06;
 constant float	SHADOW_MIN_WEIGHT = 0.25;
 constant float	TMIN = 1e-3;
 constant float	NOHIT = 1e30f;
@@ -382,7 +383,22 @@ static float3	trace(float3 o, float3 d, constant t_gpu_frame &f,
 	return (color);
 }
 
+static float	channel_diff(float4 a, float4 b)
+{
+	float3 d = fabs(a.rgb - b.rgb);
+
+	return (max3(d.x, d.y, d.z));
+}
+
+/*
+** pass 0: normal (f.samples x f.samples rayos por pixel).
+** pass 1 y 2: antialiasing adaptativo. El 1 calcula 1 rayo por pixel; el
+** 2 solo repite con f.samples x f.samples los pixeles que difieren de algun
+** vecino (bordes); el resto se copia tal cual.
+*/
+
 kernel void		render(texture2d<float, access::write> out [[texture(0)]],
+					texture2d<float, access::read> base [[texture(1)]],
 					constant t_gpu_frame &f [[buffer(0)]],
 					device const t_gpu_object *objs [[buffer(1)]],
 					device const t_gpu_light *lights [[buffer(2)]],
@@ -399,17 +415,33 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 
 	if (gid.x >= w || gid.y >= h)
 		return ;
+	if (f.pass == 2)
+	{
+		float4 c = base.read(gid);
+		uint2 hi = uint2(w - 1, h - 1);
+		float diff = 0;
+		diff = max(diff, channel_diff(c, base.read(uint2(max((int)gid.x - 1, 0), gid.y))));
+		diff = max(diff, channel_diff(c, base.read(uint2(min(gid.x + 1, hi.x), gid.y))));
+		diff = max(diff, channel_diff(c, base.read(uint2(gid.x, max((int)gid.y - 1, 0)))));
+		diff = max(diff, channel_diff(c, base.read(uint2(gid.x, min(gid.y + 1, hi.y)))));
+		if (diff < EDGE)
+		{
+			out.write(c, gid);
+			return ;
+		}
+	}
+	int samples = f.pass == 1 ? 1 : f.samples;
 	float depth = w / (2 * tan(f.fov * M_PI_F / 360));
 	float3 color = float3(0);
-	for (int sy = 0; sy < f.samples; sy++)
-		for (int sx = 0; sx < f.samples; sx++)
+	for (int sy = 0; sy < samples; sy++)
+		for (int sx = 0; sx < samples; sx++)
 		{
-			float px = gid.x + (sx + 0.5) / f.samples - 0.5;
-			float py = gid.y + (sy + 0.5) / f.samples - 0.5;
+			float px = gid.x + (sx + 0.5) / samples - 0.5;
+			float py = gid.y + (sy + 0.5) / samples - 0.5;
 			float3 d = normalize(f.forward.xyz * depth
 				+ f.right.xyz * (px - w / 2) + f.up.xyz * (h / 2 - py));
 			color += trace(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS);
 		}
-	color /= f.samples * f.samples;
+	color /= samples * samples;
 	out.write(float4(pow(clamp(color, 0.0, 1.0), 1 / GAMMA), 1), gid);
 }

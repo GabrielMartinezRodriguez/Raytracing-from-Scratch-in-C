@@ -56,6 +56,7 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLBuffer>				_objects;
 	id<MTLBuffer>				_lights;
 	id<MTLBuffer>				_nodes;
+	id<MTLTexture>				_base;
 	id<MTLFXSpatialScaler>		_scaler;
 	id<MTLTexture>				_lowres;
 	int							_nplanes;
@@ -239,12 +240,16 @@ static t_vec4		vec4(simd_float3 v)
 	return (f);
 }
 
-- (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd
+- (void)encodePass:(int)pass to:(id<MTLTexture>)texture
+	base:(id<MTLTexture>)base buffer:(id<MTLCommandBuffer>)cmd
 {
 	id<MTLComputeCommandEncoder>	enc = [cmd computeCommandEncoder];
 	t_gpu_frame						f = [self frame];
+
+	f.pass = pass;
 	[enc setComputePipelineState:_pipeline];
 	[enc setTexture:texture atIndex:0];
+	[enc setTexture:base atIndex:1];
 	[enc setBytes:&f length:sizeof(f) atIndex:0];
 	[enc setBuffer:_objects offset:0 atIndex:1];
 	[enc setBuffer:_lights offset:0 atIndex:2];
@@ -259,6 +264,35 @@ static t_vec4		vec4(simd_float3 v)
 	[enc dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
 		threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
+}
+
+/*
+** Con antialiasing (samples > 1) se usa el modo adaptativo salvo
+** RT_ADAPTIVE=0: primero 1 rayo por pixel y luego solo se refinan los bordes.
+*/
+
+- (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd
+{
+	bool	adaptive = _samples > 1 && !(getenv("RT_ADAPTIVE")
+		&& strcmp(getenv("RT_ADAPTIVE"), "0") == 0);
+
+	if (!adaptive)
+	{
+		[self encodePass:0 to:texture base:texture buffer:cmd];
+		return ;
+	}
+	if (!_base || _base.width != texture.width
+		|| _base.height != texture.height)
+	{
+		MTLTextureDescriptor *td = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+			width:texture.width height:texture.height mipmapped:NO];
+		td.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+		td.storageMode = MTLStorageModePrivate;
+		_base = [_device newTextureWithDescriptor:td];
+	}
+	[self encodePass:1 to:_base base:_base buffer:cmd];
+	[self encodePass:2 to:texture base:_base buffer:cmd];
 }
 
 - (id<MTLTexture>)offscreenTexture

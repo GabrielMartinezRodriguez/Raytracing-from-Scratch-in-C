@@ -78,7 +78,8 @@ typedef struct	s_gpu_frame
 	int			nlights;
 	int			samples;
 	int			nplanes;
-	int			pad[3];
+	int			pass;
+	int			pad[2];
 }				t_gpu_frame;
 
 #endif
