@@ -31,6 +31,7 @@ typedef struct	s_obj
 	size_t		capvt;
 	size_t		capvn;
 	unsigned int	material;
+	uint32_t	object;
 }				t_obj;
 
 typedef struct	s_corner
@@ -325,6 +326,7 @@ static void			add_triangle(t_gpu_mesh *mesh, t_obj *obj, t_corner *c)
 		mesh->cap = mesh->cap ? mesh->cap * 2 : 1 << 20;
 		mesh->tris = realloc(mesh->tris, sizeof(t_gpu_tri) * mesh->cap);
 		mesh->pos = realloc(mesh->pos, sizeof(float) * 9 * mesh->cap);
+		mesh->tri_obj = realloc(mesh->tri_obj, sizeof(uint32_t) * mesh->cap);
 	}
 	t = &mesh->tris[mesh->ntris];
 	pos = &mesh->pos[mesh->ntris * 9];
@@ -343,6 +345,7 @@ static void			add_triangle(t_gpu_mesh *mesh, t_obj *obj, t_corner *c)
 			? pack_normal(obj->vn[c[k].vn - 1]) : 0;
 	}
 	t->material = obj->material;
+	mesh->tri_obj[mesh->ntris - 1] = obj->object;
 }
 
 static void			dir_of(const char *path, char *out, size_t len)
@@ -377,6 +380,12 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 	memset(&obj, 0, sizeof(obj));
 	if (mesh->nmats == 0)
 		new_material(mesh, "(por defecto)");
+	if (mesh->nobjs == 0)
+	{
+		mesh->obj_names = calloc(1, 64);
+		snprintf(mesh->obj_names[0], 64, "(modelo)");
+		mesh->nobjs = 1;
+	}
 	dir_of(path, dir, sizeof(dir));
 	end = data + size;
 	for (p = data; p < end; p = next_line(p, end))
@@ -427,6 +436,17 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 				c[1] = c[2];
 			}
 		}
+		else if ((p[0] == 'o' || p[0] == 'g') && (p[1] == ' ' || p[1] == '\t'))
+		{
+			/*
+			** Cada "o nombre" (u "g") abre un objeto: la fisica mueve los
+			** triangulos de cada objeto por separado.
+			*/
+			read_name(p + 1, end, name, sizeof(name));
+			mesh->obj_names = realloc(mesh->obj_names, 64 * (mesh->nobjs + 1));
+			snprintf(mesh->obj_names[mesh->nobjs], 64, "%s", name);
+			obj.object = mesh->nobjs++;
+		}
 		else if (strncmp(p, "usemtl", 6) == 0)
 		{
 			read_name(p + 6, end, name, sizeof(name));
@@ -457,10 +477,10 @@ typedef struct	s_cache_header
 	int64_t		obj_mtime;
 	uint64_t	ntris;
 	int32_t		nmats;
-	int32_t		pad;
+	int32_t		nobjs;
 }				t_cache_header;
 
-static const char	g_magic[8] = "RTMESH3";
+static const char	g_magic[8] = "RTMESH4";
 
 static void			obj_stat(const char *path, uint64_t *size, int64_t *mtime)
 {
@@ -487,10 +507,13 @@ static int			save_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	obj_stat(obj, &h.obj_size, &h.obj_mtime);
 	h.ntris = mesh->ntris;
 	h.nmats = mesh->nmats;
+	h.nobjs = mesh->nobjs;
 	fwrite(&h, sizeof(h), 1, f);
 	fwrite(mesh->mats, sizeof(t_mesh_material), mesh->nmats, f);
 	fwrite(mesh->pos, sizeof(float) * 9, mesh->ntris, f);
 	fwrite(mesh->tris, sizeof(t_gpu_tri), mesh->ntris, f);
+	fwrite(mesh->obj_names, 64, mesh->nobjs, f);
+	fwrite(mesh->tri_obj, sizeof(uint32_t), mesh->ntris, f);
 	fclose(f);
 	return (0);
 }
@@ -509,7 +532,8 @@ static long			load_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	if (size < sizeof(*h) || memcmp(h->magic, g_magic, 8) != 0
 		|| h->obj_size != osize || h->obj_mtime != omtime
 		|| size != sizeof(*h) + h->nmats * sizeof(t_mesh_material)
-		+ h->ntris * (sizeof(float) * 9 + sizeof(t_gpu_tri)))
+		+ h->ntris * (sizeof(float) * 9 + sizeof(t_gpu_tri) + sizeof(uint32_t))
+		+ (size_t)h->nobjs * 64)
 	{
 		munmap(data, size);
 		return (-1);
@@ -522,6 +546,12 @@ static long			load_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	mesh->cap = h->ntris;
 	mesh->pos = (float *)(data + sizeof(*h) + sizeof(t_mesh_material) * h->nmats);
 	mesh->tris = (t_gpu_tri *)((char *)mesh->pos + sizeof(float) * 9 * h->ntris);
+	mesh->nobjs = h->nobjs;
+	mesh->obj_names = malloc((size_t)h->nobjs * 64);
+	memcpy(mesh->obj_names, (char *)(mesh->tris + h->ntris),
+		(size_t)h->nobjs * 64);
+	mesh->tri_obj = (uint32_t *)((char *)(mesh->tris + h->ntris)
+		+ (size_t)h->nobjs * 64);
 	mesh->map = data;
 	mesh->map_size = size;
 	return ((long)mesh->ntris);
@@ -551,7 +581,9 @@ void				free_mesh_data(t_gpu_mesh *mesh)
 	{
 		free(mesh->pos);
 		free(mesh->tris);
+		free(mesh->tri_obj);
 	}
+	mesh->tri_obj = NULL;
 	mesh->map = NULL;
 	mesh->pos = NULL;
 	mesh->tris = NULL;

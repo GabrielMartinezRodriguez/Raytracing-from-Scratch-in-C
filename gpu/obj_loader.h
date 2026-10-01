@@ -1,5 +1,6 @@
 #ifndef OBJ_LOADER_H
 # define OBJ_LOADER_H
+# include <stdint.h>
 # include "shared.h"
 
 /*
@@ -38,6 +39,9 @@ typedef struct	s_gpu_mesh
 	size_t			map_size;
 	simd_float3		center;
 	simd_float3		size;
+	uint32_t		*tri_obj;
+	char			(*obj_names)[64];
+	int				nobjs;
 }				t_gpu_mesh;
 
 /*

@@ -996,7 +996,8 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 		/*
 		** Salida del denoiser (luz lineal) -> tonemapping + gamma.
 		*/
-		float3 c = tonemap(base.read(gid).rgb);
+		float3 c = tonemap(base.read(gid).rgb * (f.extra.x > 0 ? f.extra.x
+			: 1.0f));
 		out.write(float4(pow(c, 1 / GAMMA), 1), gid);
 		return ;
 	}
@@ -1020,11 +1021,22 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 		float3 c = trace_gi(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
 			hash(gid.x * 1973 + gid.y * 9277 + f.frame * 104729), first_t,
 			alb, nrm, spc, rgh);
-		out.write(float4(c * (f.env.y > 0 ? f.env.w : GI_EXPOSURE), 1), gid);
+		float3 lit = c * (f.env.y > 0 ? f.env.w : GI_EXPOSURE);
+		/*
+		** Modo acumulacion (video de calidad sin denoiser): se suma la
+		** muestra a lo acumulado (base) y se escribe en out (ping-pong).
+		*/
+		if (f.accum > 0)
+		{
+			float4 prev = f.accum == 2 ? base.read(gid) : float4(0);
+			out.write(prev + float4(lit, 1), gid);
+			return ;
+		}
+		out.write(float4(lit, 1), gid);
 		albedo_out.write(float4(alb, 1), gid);
 		normal_out.write(float4(nrm, 0), gid);
-		rough_out.write(float4(f.pad == 1 ? 0.9f : rgh), gid);
-		spec_out.write(float4(f.pad == 1 ? float3(0.04f) : spc, 1), gid);
+		rough_out.write(float4(rgh), gid);
+		spec_out.write(float4(spc, 1), gid);
 		float3 world = f.origin.xyz + d * min(first_t, 1e5f);
 		float3 v = world - f.prev_origin.xyz;
 		float z = dot(v, f.prev_forward.xyz);

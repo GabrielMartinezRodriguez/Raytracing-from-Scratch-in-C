@@ -103,7 +103,7 @@ typedef struct	s_gpu_frame
 	float		spread;
 	int			ao_rays;
 	unsigned int	frame;
-	int			pad;
+	int			accum;
 	t_vec4		scene_min;
 	t_vec4		scene_max;
 	t_vec4		prev_origin;
@@ -114,6 +114,7 @@ typedef struct	s_gpu_frame
 	t_vec4		sun_dir;
 	t_vec4		sun_color;
 	t_vec4		env;
+	t_vec4		extra;
 }				t_gpu_frame;
 
 #endif

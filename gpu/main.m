@@ -20,6 +20,7 @@
 #include "bvh.h"
 #include "obj_loader.h"
 #include "hdri.h"
+#include "sim.h"
 #include "shader_src.h"
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
@@ -45,6 +46,9 @@ static t_vec4		vec4(simd_float3 v)
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)buildInstances:(t_gpu_mesh *)mesh;
+- (void)buildMeshStructure;
+- (void)simStep:(t_sim *)sim dt:(float)dt;
+- (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)offscreenTexture;
 - (void)useCamera:(int)index;
@@ -109,6 +113,13 @@ static float	aces(float x)
 	id<MTLIntersectionFunctionTable>	_table;
 	id<MTLAccelerationStructure>	_meshAccel;
 	id<MTLAccelerationStructure>	_meshPrim;
+	uint32_t					*_triObj;
+	float						*_restPos;
+	t_gpu_tri					*_restTris;
+	id<MTLTexture>				_accA;
+	id<MTLTexture>				_accB;
+	int							_accumMode;
+	float						_accumScale;
 	id<MTLBuffer>				_insts;
 	int							_ninsts;
 	id<MTLIntersectionFunctionTable>	_meshTable;
@@ -483,17 +494,72 @@ static bool		has_transparency(CGImageRef img)
 	t_gpu_tri *tris = _tris.contents;
 	size_t io = 0;
 	size_t ia = nop;
+	_triObj = malloc(sizeof(uint32_t) * (n + 1));
 	for (size_t i = 0; i < n; i++)
 	{
 		size_t k = alpha[mesh->tris[i].material] ? ia++ : io++;
 		memcpy(&pos[k * 9], &mesh->pos[i * 9], sizeof(float) * 9);
 		tris[k] = mesh->tris[i];
+		_triObj[k] = mesh->tri_obj ? mesh->tri_obj[i] : 0;
 	}
+	/*
+	** Pose de reposo (para animar: cada imagen parte de aqui).
+	*/
+	_restPos = malloc(sizeof(float) * 9 * n);
+	_restTris = malloc(sizeof(t_gpu_tri) * n);
+	memcpy(_restPos, pos, sizeof(float) * 9 * n);
+	memcpy(_restTris, tris, sizeof(t_gpu_tri) * n);
 	free(alpha);
 	free_mesh_data(mesh);
 	_ntris = (int)n;
 	_nopaque = (int)nop;
-	NSMutableArray *geos = [NSMutableArray array];
+	[self buildMeshStructure];
+	[self buildInstances:mesh];
+	uint32_t base = (uint32_t)nop;
+	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
+		options:MTLResourceStorageModeShared];
+	MTLIntersectionFunctionTableDescriptor *tdesc =
+		[MTLIntersectionFunctionTableDescriptor new];
+	tdesc.functionCount = 1;
+	_meshTable = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
+	[_meshTable setFunction:[_pipeline functionHandleWithFunction:alpha_fn]
+		atIndex:0];
+	[_meshTable setBuffer:_tris offset:0 atIndex:0];
+	[_meshTable setBuffer:_mats offset:0 atIndex:1];
+	[_meshTable setBuffer:_meshBase offset:0 atIndex:2];
+	printf("malla: %zu triangulos (%zu opacos, %zu con transparencia), "
+		"estructura de %.0f MB en %.0f ms\n", n, nop, n - nop,
+		_meshPrim.size / 1048576.0, (CACurrentMediaTime() - t0) * 1000);
+}
+
+/*
+** Recorrido de prueba: desde la camara 1 avanza 2,5 m y gira 0,25 rad.
+** Deterministico por t (0..1) para poder comparar con las referencias.
+*/
+
+- (void)pathAt:(float)t frame:(unsigned int)frame
+{
+	if (getenv("RT_STATIC"))
+		t = 0.5f;
+	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
+	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
+	float len = getenv("RT_PATH_LEN") ? atof(getenv("RT_PATH_LEN")) : 1;
+	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm * len;
+	_yaw = _pathYaw + 0.25f * ty * len;
+	_frame = frame;
+}
+
+/*
+** Estructura de aceleracion de la malla con las posiciones actuales del
+** buffer: se llama al cargar y en cada imagen de una simulacion.
+*/
+
+- (void)buildMeshStructure
+{
+	size_t			n = _ntris;
+	size_t			nop = _nopaque;
+	NSMutableArray	*geos = [NSMutableArray array];
+
 	for (int k = 0; k < 2; k++)
 	{
 		size_t first = k == 0 ? 0 : nop;
@@ -515,52 +581,80 @@ static bool		has_transparency(CGImageRef img)
 	desc.geometryDescriptors = geos;
 	MTLAccelerationStructureSizes sizes =
 		[_device accelerationStructureSizesWithDescriptor:desc];
-	_meshPrim = [_device newAccelerationStructureWithSize:
+	id<MTLAccelerationStructure> as = [_device newAccelerationStructureWithSize:
 		sizes.accelerationStructureSize];
 	id<MTLBuffer> scratch = [_device newBufferWithLength:
 		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
 	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
 	id<MTLAccelerationStructureCommandEncoder> enc =
 		[cmd accelerationStructureCommandEncoder];
-	[enc buildAccelerationStructure:_meshPrim descriptor:desc
+	[enc buildAccelerationStructure:as descriptor:desc
 		scratchBuffer:scratch scratchBufferOffset:0];
 	[enc endEncoding];
 	[cmd commit];
 	[cmd waitUntilCompleted];
-	[self buildInstances:mesh];
-	uint32_t base = (uint32_t)nop;
-	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
-		options:MTLResourceStorageModeShared];
-	MTLIntersectionFunctionTableDescriptor *tdesc =
-		[MTLIntersectionFunctionTableDescriptor new];
-	tdesc.functionCount = 1;
-	_meshTable = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
-	[_meshTable setFunction:[_pipeline functionHandleWithFunction:alpha_fn]
-		atIndex:0];
-	[_meshTable setBuffer:_tris offset:0 atIndex:0];
-	[_meshTable setBuffer:_mats offset:0 atIndex:1];
-	[_meshTable setBuffer:_meshBase offset:0 atIndex:2];
-	printf("malla: %zu triangulos (%zu opacos, %zu con transparencia), "
-		"estructura de %.0f MB en %.0f ms\n", n, nop, n - nop,
-		sizes.accelerationStructureSize / 1048576.0,
-		(CACurrentMediaTime() - t0) * 1000);
+	if (_meshAccel == _meshPrim)
+		_meshAccel = as;
+	_meshPrim = as;
 }
 
 /*
-** Recorrido de prueba: desde la camara 1 avanza 2,5 m y gira 0,25 rad.
-** Deterministico por t (0..1) para poder comparar con las referencias.
+** Un paso de simulacion: fisica, vertices movidos a su sitio y estructura
+** de aceleracion reconstruida.
 */
 
-- (void)pathAt:(float)t frame:(unsigned int)frame
+- (void)simStep:(t_sim *)sim dt:(float)dt
 {
-	if (getenv("RT_STATIC"))
-		t = 0.5f;
-	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
-	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
-	float len = getenv("RT_PATH_LEN") ? atof(getenv("RT_PATH_LEN")) : 1;
-	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm * len;
-	_yaw = _pathYaw + 0.25f * ty * len;
-	_frame = frame;
+	sim_advance(sim, dt);
+	sim_apply(sim, _triObj, _restPos, _restTris, _meshPos.contents,
+		_tris.contents, _ntris);
+	[self buildMeshStructure];
+}
+
+/*
+** Imagen de calidad sin denoiser: spp muestras de luz global sumadas en la
+** GPU (dos texturas en ping-pong) y un ultimo paso que divide y aplica el
+** tonemapping.
+*/
+
+- (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+{
+	if (!_accA || _accA.width != out.width || _accA.height != out.height)
+	{
+		_accA = [self privateTexture:MTLPixelFormatRGBA32Float w:out.width
+			h:out.height usage:MTLTextureUsageShaderRead
+			| MTLTextureUsageShaderWrite];
+		_accB = [self privateTexture:MTLPixelFormatRGBA32Float w:out.width
+			h:out.height usage:MTLTextureUsageShaderRead
+			| MTLTextureUsageShaderWrite];
+	}
+	if (!_denoiser || _denoiser.outputWidth != out.width)
+	{
+		id<MTLCommandBuffer> warm = [_queue commandBuffer];
+		[self encodeGITo:out scale:1 buffer:warm];
+		[warm commit];
+		[warm waitUntilCompleted];
+	}
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	id<MTLTexture> src = _accA;
+	id<MTLTexture> dst = _accB;
+	for (int s = 0; s < spp; s++)
+	{
+		_frame = frame * 4096 + s;
+		_accumMode = s == 0 ? 1 : 2;
+		[self encodePass:4 to:dst base:src buffer:cmd];
+		id<MTLTexture> t = src;
+		src = dst;
+		dst = t;
+	}
+	_accumMode = 0;
+	_accumScale = 1.0f / spp;
+	[self encodePass:5 to:out base:src buffer:cmd];
+	_accumScale = 0;
+	[cmd commit];
+	[cmd waitUntilCompleted];
+	if (cmd.error)
+		fprintf(stderr, "error GPU: %s\n", cmd.error.localizedDescription.UTF8String);
 }
 
 /*
@@ -747,7 +841,8 @@ static bool		has_transparency(CGImageRef img)
 	f.sun_dir = _sunDir;
 	f.sun_color = _sunColor;
 	f.env = _env;
-	f.pad = getenv("RT_GUIDES") ? atoi(getenv("RT_GUIDES")) : 0;
+	f.accum = _accumMode;
+	f.extra = simd_make_float4(_accumScale, 0, 0, 0);
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;
@@ -1444,6 +1539,50 @@ static void		gi_reference(Renderer *renderer, int n, const char *prefix,
 	}
 }
 
+/*
+** --video con --sim: cada imagen avanza la fisica 1/fps segundos, mueve la
+** malla y se renderiza acumulando spp muestras (RT_SPP, 32 por defecto).
+*/
+
+static void		render_sim_video(Renderer *renderer, t_sim *sim, int n,
+					const char *out, int fps)
+{
+	id<MTLTexture>	texture = [renderer offscreenTexture];
+	size_t			w = texture.width;
+	size_t			h = texture.height;
+	int				spp = getenv("RT_SPP") ? atoi(getenv("RT_SPP")) : 32;
+	char			cmd[2048];
+	CFTimeInterval	t0 = CACurrentMediaTime();
+
+	snprintf(cmd, sizeof(cmd), "ffmpeg -loglevel error -y -f rawvideo "
+		"-pix_fmt bgra -s %zux%zu -r %d -i - -c:v libx264 -preset slow "
+		"-crf 16 -pix_fmt yuv420p '%s'", w, h, fps, out);
+	FILE *pipe = popen(cmd, "w");
+	void *pixels = malloc(w * h * 4);
+	[renderer pathAt:0 frame:0];
+	[renderer simStep:sim dt:0];
+	for (int i = 0; i < n; i++)
+	{
+		if (i > 0)
+			[renderer simStep:sim dt:1.0f / fps];
+		[renderer renderAccum:texture samples:spp frame:i];
+		[texture getBytes:pixels bytesPerRow:w * 4
+			fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+		fwrite(pixels, 1, w * h * 4, pipe);
+		if (getenv("RT_DUMP") && (i % 30 == 0 || i == n - 1))
+		{
+			char name[1200];
+			snprintf(name, sizeof(name), "%s_f%03d", getenv("RT_DUMP"), i);
+			save_png(texture, name);
+		}
+		fprintf(stderr, "\rimagen %d/%d", i + 1, n);
+	}
+	pclose(pipe);
+	free(pixels);
+	printf("\nvideo %s: %d imagenes %zux%zu, %d muestras, %.1f s en total\n",
+		out, n, w, h, spp, CACurrentMediaTime() - t0);
+}
+
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 {
 	NSApplication	*app = [NSApplication sharedApplication];
@@ -1498,6 +1637,16 @@ int				main(int argc, char **argv)
 		** la escena del .rt, que sigue aportando camara, luces y resolucion.
 		*/
 		const char *obj_path = NULL;
+		const char *sim_name = NULL;
+		for (int i = 1; i + 1 < argc; i++)
+			if (strcmp(argv[i], "--sim") == 0)
+			{
+				sim_name = argv[i + 1];
+				for (int j = i; j + 2 <= argc; j++)
+					argv[j] = argv[j + 2];
+				argc -= 2;
+				break ;
+			}
 		const char *env_path = NULL;
 		float env_rot = 0;
 		float env_ev = 1;
@@ -1532,6 +1681,7 @@ int				main(int argc, char **argv)
 			}
 		export_scene(argv[1], &scene);
 		float model_size = 0;
+		static t_sim sim;
 		t_gpu_mesh mesh;
 		memset(&mesh, 0, sizeof(mesh));
 		if (obj_path)
@@ -1555,6 +1705,8 @@ int				main(int argc, char **argv)
 			mesh.center = (lo + hi) * 0.5f;
 			mesh.size = hi - lo;
 		}
+		if (sim_name && (!obj_path || sim_setup(&sim, sim_name, &mesh) < 0))
+			return (1);
 		renderer = [[Renderer alloc] initWithScene:&scene
 			mesh:obj_path ? &mesh : NULL];
 		if (env_path)
@@ -1577,6 +1729,9 @@ int				main(int argc, char **argv)
 		}
 		else if (argc >= 6 && strcmp(argv[2], "--giref") == 0)
 			gi_reference(renderer, atoi(argv[3]), argv[4], atoi(argv[5]));
+		else if (argc >= 5 && strcmp(argv[2], "--video") == 0 && sim_name)
+			render_sim_video(renderer, &sim, atoi(argv[3]), argv[4],
+				argc >= 6 ? atoi(argv[5]) : 30);
 		else if (argc >= 5 && strcmp(argv[2], "--video") == 0)
 			render_video(renderer, atoi(argv[3]), argv[4],
 				argc >= 6 ? atoi(argv[5]) : 30);
