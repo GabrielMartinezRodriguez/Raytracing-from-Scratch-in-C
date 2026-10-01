@@ -42,6 +42,7 @@ static t_vec4		vec4(simd_float3 v)
 @property (nonatomic) bool giOn;
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
+- (void)buildInstances:(t_gpu_mesh *)mesh;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)offscreenTexture;
 - (void)useCamera:(int)index;
@@ -92,6 +93,9 @@ static t_vec4		vec4(simd_float3 v)
 	id<MTLAccelerationStructure>	_accel;
 	id<MTLIntersectionFunctionTable>	_table;
 	id<MTLAccelerationStructure>	_meshAccel;
+	id<MTLAccelerationStructure>	_meshPrim;
+	id<MTLBuffer>				_insts;
+	int							_ninsts;
 	id<MTLIntersectionFunctionTable>	_meshTable;
 	id<MTLBuffer>				_meshPos;
 	id<MTLBuffer>				_tris;
@@ -269,6 +273,15 @@ static t_vec4		vec4(simd_float3 v)
 		(CACurrentMediaTime() - t0) * 1000);
 }
 
+static uint32_t	hash_int(uint32_t x)
+{
+	x ^= x >> 16;
+	x *= 0x7feb352dU;
+	x ^= x >> 15;
+	x *= 0x846ca68bU;
+	return (x ^ (x >> 16));
+}
+
 static float	halton(int i, int b)
 {
 	float	f = 1;
@@ -439,18 +452,19 @@ static bool		has_transparency(CGImageRef img)
 	desc.geometryDescriptors = geos;
 	MTLAccelerationStructureSizes sizes =
 		[_device accelerationStructureSizesWithDescriptor:desc];
-	_meshAccel = [_device newAccelerationStructureWithSize:
+	_meshPrim = [_device newAccelerationStructureWithSize:
 		sizes.accelerationStructureSize];
 	id<MTLBuffer> scratch = [_device newBufferWithLength:
 		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
 	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
 	id<MTLAccelerationStructureCommandEncoder> enc =
 		[cmd accelerationStructureCommandEncoder];
-	[enc buildAccelerationStructure:_meshAccel descriptor:desc
+	[enc buildAccelerationStructure:_meshPrim descriptor:desc
 		scratchBuffer:scratch scratchBufferOffset:0];
 	[enc endEncoding];
 	[cmd commit];
 	[cmd waitUntilCompleted];
+	[self buildInstances:mesh];
 	uint32_t base = (uint32_t)nop;
 	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
 		options:MTLResourceStorageModeShared];
@@ -483,6 +497,76 @@ static bool		has_transparency(CGImageRef img)
 	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm;
 	_yaw = _pathYaw + 0.25f * ty;
 	_frame = frame;
+}
+
+/*
+** Instancias del modelo. Sin RT_CITY hay una sola (el modelo tal cual);
+** con RT_CITY=N, una cuadricula de N x N copias separadas por el tamano del
+** modelo y giradas de 90 en 90 grados para que no se vean todas iguales.
+*/
+
+- (void)buildInstances:(t_gpu_mesh *)mesh
+{
+	int				n = getenv("RT_CITY") ? atoi(getenv("RT_CITY")) : 1;
+	float			sx = mesh->size.x * 1.02f;
+	float			sz = mesh->size.z * 1.02f;
+	float			step = fmaxf(sx, sz);
+
+	n = n < 1 ? 1 : n;
+	_ninsts = n * n;
+	_insts = [_device newBufferWithLength:sizeof(simd_float4) * _ninsts
+		options:MTLResourceStorageModeShared];
+	id<MTLBuffer> descs = [_device newBufferWithLength:
+		sizeof(MTLAccelerationStructureInstanceDescriptor) * _ninsts
+		options:MTLResourceStorageModeShared];
+	simd_float4 *it = _insts.contents;
+	MTLAccelerationStructureInstanceDescriptor *d = descs.contents;
+	for (int i = 0; i < _ninsts; i++)
+	{
+		int gx = i % n;
+		int gz = i / n;
+		int rot = (i == 0) ? 0 : (int)(hash_int(i) % 4);
+		float c = (float[]){1, 0, -1, 0}[rot];
+		float s = (float[]){0, 1, 0, -1}[rot];
+		/*
+		** Cada copia gira alrededor del centro del modelo y se coloca en su
+		** celda de la cuadricula.
+		*/
+		simd_float3 ctr = mesh->center;
+		simd_float3 rc = simd_make_float3(c * ctr.x + s * ctr.z, ctr.y,
+			-s * ctr.x + c * ctr.z);
+		float tx = gx * step + ctr.x - rc.x;
+		float tz = gz * step + ctr.z - rc.z;
+		it[i] = simd_make_float4(c, s, tx, tz);
+		memset(&d[i], 0, sizeof(d[i]));
+		d[i].accelerationStructureIndex = 0;
+		d[i].mask = 0xFF;
+		d[i].transformationMatrix.columns[0] = MTLPackedFloat3Make(c, 0, -s);
+		d[i].transformationMatrix.columns[1] = MTLPackedFloat3Make(0, 1, 0);
+		d[i].transformationMatrix.columns[2] = MTLPackedFloat3Make(s, 0, c);
+		d[i].transformationMatrix.columns[3] = MTLPackedFloat3Make(tx, 0, tz);
+	}
+	MTLInstanceAccelerationStructureDescriptor *idesc =
+		[MTLInstanceAccelerationStructureDescriptor descriptor];
+	idesc.instancedAccelerationStructures = @[_meshPrim];
+	idesc.instanceCount = _ninsts;
+	idesc.instanceDescriptorBuffer = descs;
+	MTLAccelerationStructureSizes sizes =
+		[_device accelerationStructureSizesWithDescriptor:idesc];
+	_meshAccel = [_device newAccelerationStructureWithSize:
+		sizes.accelerationStructureSize];
+	id<MTLBuffer> scratch = [_device newBufferWithLength:
+		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	id<MTLAccelerationStructureCommandEncoder> enc =
+		[cmd accelerationStructureCommandEncoder];
+	[enc buildAccelerationStructure:_meshAccel descriptor:idesc
+		scratchBuffer:scratch scratchBufferOffset:0];
+	[enc endEncoding];
+	[cmd commit];
+	[cmd waitUntilCompleted];
+	printf("instancias: %d (%.0f millones de triangulos en escena)\n",
+		_ninsts, (double)_ninsts * _ntris / 1e6);
 }
 
 - (void)useCamera:(int)index
@@ -595,6 +679,8 @@ static bool		has_transparency(CGImageRef img)
 		[enc setBuffer:_mats offset:0 atIndex:11];
 		[enc setBuffer:_meshPos offset:0 atIndex:12];
 		[enc useResource:_meshAccel usage:MTLResourceUsageRead];
+		[enc useResource:_meshPrim usage:MTLResourceUsageRead];
+		[enc setBuffer:_insts offset:0 atIndex:13];
 		[enc useResource:_meshBase usage:MTLResourceUsageRead];
 		for (id<MTLTexture> t in _textures)
 			[enc useResource:t usage:MTLResourceUsageRead];
@@ -1177,6 +1263,8 @@ int				main(int argc, char **argv)
 				"(%.1f, %.1f, %.1f)\n", (CACurrentMediaTime() - t0) * 1000,
 				lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
 			model_size = simd_length(hi - lo);
+			mesh.center = (lo + hi) * 0.5f;
+			mesh.size = hi - lo;
 		}
 		renderer = [[Renderer alloc] initWithScene:&scene
 			mesh:obj_path ? &mesh : NULL];

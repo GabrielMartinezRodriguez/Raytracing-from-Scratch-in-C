@@ -26,6 +26,8 @@ typedef struct	s_gpu_mesh
 	int				capmats;
 	void			*map;
 	size_t			map_size;
+	simd_float3		center;
+	simd_float3		size;
 }				t_gpu_mesh;
 
 /*

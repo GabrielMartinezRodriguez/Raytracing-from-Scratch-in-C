@@ -5,11 +5,12 @@ using namespace metal;
 using namespace raytracing;
 # define ACCEL_DECL primitive_acceleration_structure accel, \
 	intersection_function_table<> table, \
-	primitive_acceleration_structure mesh_accel, \
-	intersection_function_table<triangle_data> mesh_table, \
+	instance_acceleration_structure mesh_accel, \
+	intersection_function_table<triangle_data, instancing> mesh_table, \
 	device const t_gpu_tri *tris, device const GpuMaterial *mats, \
-	device const packed_float3 *mesh_pos
-# define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, mesh_pos
+	device const packed_float3 *mesh_pos, device const float4 *insts
+# define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, \
+	mesh_pos, insts
 #else
 # define ACCEL_DECL device const t_gpu_node *nodes
 # define ACCEL_ARGS nodes
@@ -67,6 +68,7 @@ struct			Hit
 	int			id;
 	float2		bary;
 	bool		mesh;
+	int			inst;
 };
 
 static float	hit_plane(float3 o, float3 d, float3 p, float3 n)
@@ -233,6 +235,16 @@ static float3	unpack_normal(uint v)
 	return (normalize(n));
 }
 
+static float3	inst_rotate(float3 v, float4 it)
+{
+	return (float3(it.x * v.x + it.y * v.z, v.y, -it.y * v.x + it.x * v.z));
+}
+
+static float3	inst_point(float3 p, float4 it)
+{
+	return (inst_rotate(p, it) + float3(it.z, 0, it.w));
+}
+
 static float2	tri_uv(device const t_gpu_tri &t, float2 b)
 {
 	return (float2(t.uv[0], t.uv[1]) * (1 - b.x - b.y)
@@ -244,7 +256,7 @@ static float2	tri_uv(device const t_gpu_tri &t, float2 b)
 ** punto tocado del triangulo es opaco segun el canal alfa de la textura.
 */
 
-[[intersection(triangle, triangle_data)]]
+[[intersection(triangle, triangle_data, instancing)]]
 bool			alpha_test(uint pid [[primitive_id]],
 					float2 bary [[barycentric_coord]],
 					device const t_gpu_tri *tris [[buffer(0)]],
@@ -305,18 +317,18 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 	}
 	if (f.ntris > 0)
 	{
-		intersector<triangle_data> mi;
+		intersector<triangle_data, instancing> mi;
 		mi.assume_geometry_type(geometry_type::triangle);
 		mi.accept_any_intersection(any);
 		ray mr(o, d, 0.0f, hit.t);
-		intersection_result<triangle_data> mres = mi.intersect(mr, mesh_accel,
-			mesh_table);
+		intersection_result<triangle_data, instancing> mres = mi.intersect(mr,
+			mesh_accel, mesh_table);
 		if (mres.type == intersection_type::triangle)
 		{
 			uint tri = (mres.geometry_id == 0 && f.nopaque > 0)
 				? mres.primitive_id : f.nopaque + mres.primitive_id;
 			hit = {mres.distance, float3(0), (int)tri,
-				mres.triangle_barycentric_coord, true};
+				mres.triangle_barycentric_coord, true, (int)mres.instance_id};
 			if (any)
 				return (hit);
 		}
@@ -526,16 +538,21 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 	if (hit.mesh)
 	{
 		device const t_gpu_tri &t = tris[hit.id];
-		float3 p0 = mesh_pos[hit.id * 3];
-		float3 p1 = mesh_pos[hit.id * 3 + 1];
-		float3 p2 = mesh_pos[hit.id * 3 + 2];
+		/*
+		** Instancia: giro alrededor de Y (cos, sin) y desplazamiento en X/Z.
+		** Las posiciones del buffer estan en el espacio del modelo.
+		*/
+		float4 it = insts[hit.inst];
+		float3 p0 = inst_point(mesh_pos[hit.id * 3], it);
+		float3 p1 = inst_point(mesh_pos[hit.id * 3 + 1], it);
+		float3 p2 = inst_point(mesh_pos[hit.id * 3 + 2], it);
 		float3 cr = cross(p1 - p0, p2 - p0);
 		s.ng = normalize(cr);
 		if (dot(s.ng, d) > 0)
 			s.ng = -s.ng;
 		float2 b = hit.bary;
-		float3 ns = unpack_normal(t.n[0]) * (1 - b.x - b.y)
-			+ unpack_normal(t.n[1]) * b.x + unpack_normal(t.n[2]) * b.y;
+		float3 ns = inst_rotate(unpack_normal(t.n[0]) * (1 - b.x - b.y)
+			+ unpack_normal(t.n[1]) * b.x + unpack_normal(t.n[2]) * b.y, it);
 		s.n = length_squared(ns) > 1e-4f ? normalize(ns) : s.ng;
 		if (dot(s.n, s.ng) < 0)
 			s.n = -s.n;
@@ -740,11 +757,12 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 #ifdef HW_RT
 					primitive_acceleration_structure accel [[buffer(3)]],
 					intersection_function_table<> table [[buffer(4)]],
-					primitive_acceleration_structure mesh_accel [[buffer(8)]],
-					intersection_function_table<triangle_data> mesh_table [[buffer(9)]],
+					instance_acceleration_structure mesh_accel [[buffer(8)]],
+					intersection_function_table<triangle_data, instancing> mesh_table [[buffer(9)]],
 					device const t_gpu_tri *tris [[buffer(10)]],
 					device const GpuMaterial *mats [[buffer(11)]],
 					device const packed_float3 *mesh_pos [[buffer(12)]],
+					device const float4 *insts [[buffer(13)]],
 #else
 					device const t_gpu_node *nodes [[buffer(3)]],
 #endif
