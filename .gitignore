@@ -5,3 +5,4 @@ stress/*.rt
 stress/*.png
 stress/*.bmp
 stress/*.bak
+stress/rt_*
