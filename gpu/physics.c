@@ -284,6 +284,50 @@ static void		static_contacts(t_world *w, int s)
 }
 
 /*
+** Saca un punto (esfera pequena de radio r) del entorno estatico: devuelve
+** cuanto lo ha movido y la normal de la superficie. Lo usa la tela.
+*/
+
+float			world_push_point(t_world *w, simd_float3 *p, float r,
+					simd_float3 *normal)
+{
+	float	moved = 0;
+
+	for (int pass = 0; pass < 2; pass++)
+	{
+		int		saved = w->ncontacts;
+		int		s = w->nspheres;
+		float	best = 0;
+		simd_float3	bn = 0;
+
+		if (w->nspheres == w->capspheres)
+		{
+			w->capspheres = w->capspheres ? w->capspheres * 2 : 1024;
+			w->local = realloc(w->local, sizeof(t_psphere) * w->capspheres);
+			w->wpos = realloc(w->wpos, sizeof(simd_float3) * w->capspheres);
+			w->owner = realloc(w->owner, sizeof(int) * w->capspheres);
+		}
+		w->wpos[s] = *p;
+		w->local[s].r = r;
+		w->owner[s] = 0;
+		static_contacts(w, s);
+		for (int k = saved; k < w->ncontacts; k++)
+			if (w->contacts[k].depth > best)
+			{
+				best = w->contacts[k].depth;
+				bn = w->contacts[k].n;
+			}
+		w->ncontacts = saved;
+		if (best <= 0)
+			break ;
+		*p += bn * best;
+		*normal = bn;
+		moved += best;
+	}
+	return (moved);
+}
+
+/*
 ** Pares de esferas cercanas de cuerpos distintos con una tabla hash
 ** espacial (celda = diametro de la esfera mas grande).
 */

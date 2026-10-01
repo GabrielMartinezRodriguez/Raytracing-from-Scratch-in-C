@@ -10,6 +10,27 @@
 ** a la GPU; sim_apply mueve los vertices de cada imagen.
 */
 
+/*
+** Tela: rejilla de particulas con restricciones de distancia (estructura,
+** cizalla y flexion), resuelta con Position Based Dynamics.
+*/
+
+typedef struct	s_cloth
+{
+	int			n;
+	simd_float3	*x;
+	simd_float3	*p;
+	simd_float3	*v;
+	int			(*cons)[2];
+	float		*rest;
+	float		*stiff;
+	int			ncons;
+	simd_float3	*nrm;
+	simd_float3	*hitn;
+	int			obj;
+	float		size;
+}				t_cloth;
+
 typedef struct	s_sim
 {
 	t_world		w;
@@ -19,6 +40,9 @@ typedef struct	s_sim
 	int			kind;
 	int			wind_obj;
 	float		wind;
+	simd_float3	wind_base;
+	float		wind_height;
+	t_cloth		cloth;
 }				t_sim;
 
 int				sim_setup(t_sim *s, const char *name, t_gpu_mesh *mesh);

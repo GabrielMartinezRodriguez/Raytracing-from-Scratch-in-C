@@ -85,6 +85,8 @@ int				world_add_body(t_world *w, const t_psphere *spheres, int n,
 					float density, simd_float3 rest_com);
 void			world_step(t_world *w, float dt);
 void			world_settle(t_world *w);
+float			world_push_point(t_world *w, simd_float3 *p, float r,
+					simd_float3 *normal);
 int				build_cluster(const float *tris, int ntris, int res,
 					t_psphere **out, simd_float3 *com);
 int				fit_sphere(const float *tris, int ntris, t_psphere **out,
