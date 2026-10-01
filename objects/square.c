@@ -42,7 +42,6 @@ t_intersection		*squarecollision(t_rayo ray, t_square *sq)
 	t_vect3			puntointer;
 	double			lambda;
 
-	inisquare(sq);
 	lambda = pseudointersection(ray, sq->point, sq->normal);
 	if (lambda <= 0)
 		return (NULL);

@@ -17,7 +17,7 @@ void			loadsphere(t_scene *scene, char **words)
 	t_list_obj		*lista;
 	t_esfera		*sp;
 
-	if (countwords(words) != 4)
+	if (countwords(words) != 4 && countwords(words) != 5)
 		error("mal formato de esfera");
 	lista = ft_calloc(1, sizeof(t_list_obj));
 	lista->type = sphere;
@@ -27,6 +27,7 @@ void			loadsphere(t_scene *scene, char **words)
 	sp->color = chargecolor(words[3]);
 	lista->object = sp;
 	lista->functioncoll = &spherecollision;
+	loadreflect(lista, words, 4);
 	addobject(scene, lista);
 }
 
@@ -35,7 +36,7 @@ void			loadplane(t_scene *scene, char **words)
 	t_list_obj		*lista;
 	t_plane			*pl;
 
-	if (countwords(words) != 4)
+	if (countwords(words) != 4 && countwords(words) != 5)
 		error("mal formato de plano");
 	lista = ft_calloc(1, sizeof(t_list_obj));
 	lista->type = plane;
@@ -45,6 +46,8 @@ void			loadplane(t_scene *scene, char **words)
 	pl->color = chargecolor(words[3]);
 	lista->object = pl;
 	lista->functioncoll = &planecollision;
+	iniplane(pl);
+	loadreflect(lista, words, 4);
 	addobject(scene, lista);
 }
 
@@ -53,7 +56,7 @@ void			loadsquare(t_scene *scene, char **words)
 	t_list_obj		*lista;
 	t_square		*sq;
 
-	if (countwords(words) != 5)
+	if (countwords(words) != 5 && countwords(words) != 6)
 		error("mal formato de cuadrado");
 	lista = ft_calloc(1, sizeof(t_list_obj));
 	lista->type = square;
@@ -64,6 +67,8 @@ void			loadsquare(t_scene *scene, char **words)
 	sq->color = chargecolor(words[4]);
 	lista->object = sq;
 	lista->functioncoll = &squarecollision;
+	inisquare(sq);
+	loadreflect(lista, words, 5);
 	addobject(scene, lista);
 }
 
@@ -72,7 +77,7 @@ void			loadcylinder(t_scene *scene, char **words)
 	t_list_obj		*lista;
 	t_cylinder		*cyl;
 
-	if (countwords(words) != 6)
+	if (countwords(words) != 6 && countwords(words) != 7)
 		error("mal formato de cilindro");
 	lista = ft_calloc(1, sizeof(t_list_obj));
 	lista->type = cylinder;
@@ -85,6 +90,8 @@ void			loadcylinder(t_scene *scene, char **words)
 	lista->object = cyl;
 	lista->functioncoll = &cylindercollision;
 	inicylinder(cyl);
+	ini_tops(cyl);
+	loadreflect(lista, words, 6);
 	addobject(scene, lista);
 }
 
@@ -93,16 +100,27 @@ void			loadtriangle(t_scene *scene, char **words)
 	t_list_obj		*lista;
 	t_triangle		*tri;
 
-	if (countwords(words) != 5)
+	if (countwords(words) != 5 && countwords(words) != 6)
 		error("mal formato de triangulo");
 	lista = ft_calloc(1, sizeof(t_list_obj));
 	lista->type = triangle;
-	tri = ft_calloc(1, sizeof(t_cylinder));
+	tri = ft_calloc(1, sizeof(t_triangle));
 	tri->point1 = chargepoint(words[1]);
 	tri->point2 = chargepoint(words[2]);
 	tri->point3 = chargepoint(words[3]);
 	tri->color = chargecolor(words[4]);
 	lista->object = tri;
 	lista->functioncoll = &trianglecollision;
+	initriangle(tri);
+	loadreflect(lista, words, 5);
 	addobject(scene, lista);
+}
+
+void			loadreflect(t_list_obj *lista, char **words, int index)
+{
+	if (countwords(words) <= index)
+		return ;
+	lista->reflect = ft_atoi_double(words[index]);
+	if (lista->reflect < 0 || lista->reflect > 1)
+		error("la reflectividad debe estar en el rango [0,1]");
 }
