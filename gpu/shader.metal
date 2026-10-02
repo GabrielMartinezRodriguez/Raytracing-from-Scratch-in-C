@@ -69,6 +69,7 @@ constant float	EPSILON = 1e-3;
 constant float	EXPOSURE = 1.0;
 constant int	GI_BOUNCES = 2;
 constant int	MAX_EVENTS = 12;
+constant float	INDIRECT_MAX = 6.0f;
 constant float3	WATER_SIGMA = float3(0.9f, 0.25f, 0.12f);
 constant int	GI_SHADOW_BOUNCES = 3;
 constant float	BOUNCE_LOD_BIAS = 3.0f;
@@ -749,6 +750,17 @@ static float3	clip_caustic(float3 c, bool caustic)
 }
 
 /*
+** Recorte de luciernagas: una sola muestra de luz rebotada no puede valer
+** mas que INDIRECT_MAX (se escala manteniendo el color).
+*/
+
+static float3	clip_indirect(float3 c, int depth)
+{
+	float m = max3(c.x, c.y, c.z);
+	return (depth > 0 && m > INDIRECT_MAX ? c * (INDIRECT_MAX / m) : c);
+}
+
+/*
 ** Sombra con superficies transparentes (agua): el rayo hacia la luz
 ** atraviesa el material dielectrico perdiendo un poco en cada cara y solo
 ** lo para algo opaco. Sin agua en la escena, un rayo "cualquier impacto".
@@ -957,8 +969,8 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 		Hit hit = intersect(o, d, f, objs, ACCEL_ARGS, NOHIT, false);
 		if (hit.id < 0)
 		{
-			color += clip_caustic(weight * sky(d, f, env_map) * (depth == 0
-				|| f.env.y > 0 ? 1.0f : SKY_LIGHT), caustic);
+			color += clip_indirect(clip_caustic(weight * sky(d, f, env_map)
+				* (depth == 0 || f.env.y > 0 ? 1.0f : SKY_LIGHT), caustic), depth);
 			break ;
 		}
 		if (inside)
@@ -1021,14 +1033,27 @@ static float3	trace_gi(float3 o, float3 d, constant t_gpu_frame &f,
 			}
 			continue ;
 		}
-		color += clip_caustic(weight * direct_light(s, d, true, f, objs, lights,
-			ACCEL_ARGS, seed + event * 7919), caustic);
+		color += clip_indirect(clip_caustic(weight * direct_light(s, d, true, f,
+			objs, lights, ACCEL_ARGS, seed + event * 7919), caustic), depth);
 		if (depth == GI_BOUNCES)
 			break ;
 		depth++;
 		float3 v = -d;
-		float ps = s.pbr ? clamp(mix(0.15f, 1.0f, s.metal) * (1.2f
-			- s.rough), 0.1f, 0.95f) : 0.0f;
+		/*
+		** Probabilidad de seguir el reflejo segun cuanto aporta de verdad:
+		** Fresnel al angulo de vision frente a lo que aporta el difuso. Una
+		** madera oscura vista de canto refleja mucho; vista de frente, casi
+		** nada. Asi cada camino lleva un peso parecido y hay menos grano.
+		*/
+		float ps = 0;
+		if (s.pbr)
+		{
+			float3 fv = fresnel(f0, max(dot(s.n, v), 0.0f));
+			float es = dot(fv, float3(0.2126f, 0.7152f, 0.0722f));
+			float ed = dot(s.albedo * (1 - s.metal) * (1 - fv),
+				float3(0.2126f, 0.7152f, 0.0722f));
+			ps = clamp(es / max(es + ed, 1e-4f), 0.05f, 0.95f);
+		}
 		o = s.p;
 		if (rand01(seed * 19 + event * 31 + 5) < ps)
 		{

@@ -848,7 +848,8 @@ static bool		has_transparency(CGImageRef img)
 	f.sun_color = _sunColor;
 	f.env = _env;
 	f.accum = _accumMode;
-	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0, 0, 0);
+	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0,
+		getenv("RT_DBG") ? atof(getenv("RT_DBG")) : 0, 0);
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;

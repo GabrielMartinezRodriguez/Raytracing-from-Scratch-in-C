@@ -128,8 +128,18 @@ void			extract_sun(t_hdri *img, float dir[3], float color[3],
 	float bd[3];
 	pixel_dir(best % w, best / w, w, h, bd);
 	/*
-	** Sol = pixeles a menos de 3 grados del mas brillante y con al menos un
-	** 2% de su brillo. Su luz (radiancia por angulo solido) se suma y esos
+	** Umbral de "demasiado brillante para ser cielo": 40 veces el brillo
+	** medio. El halo alrededor del sol (mas de eso pero menos del 2% del
+	** pico) tambien pasa al disco; si se quedara en el mapa, los pocos rayos
+	** de rebote que lo encuentran darian puntos blancos sueltos.
+	*/
+	double total = 0;
+	for (int i = 0; i < w * h; i++)
+		total += lum(img->rgb + i * 3);
+	float hot = 40.0f * (float)(total / ((double)w * h));
+	/*
+	** Sol = pixeles a menos de 3 grados del mas brillante y por encima del
+	** umbral. Su luz (radiancia por angulo solido) se suma y esos
 	** pixeles se sustituyen por el brillo del cielo de alrededor.
 	*/
 	color[0] = color[1] = color[2] = 0;
@@ -156,20 +166,32 @@ void			extract_sun(t_hdri *img, float dir[3], float color[3],
 				}
 				continue ;
 			}
-			if (lum(c) < 0.02f * maxl)
+			if (lum(c) < hot)
 				continue ;
 			for (int k = 0; k < 3; k++)
 			{
 				color[k] += c[k] * domega;
 				sd[k] += d[k] * lum(c) * domega;
 			}
-			if (acos(fmin(cs, 1.0)) > max_ang)
+			if (lum(c) >= 0.02f * maxl && acos(fmin(cs, 1.0)) > max_ang)
 				max_ang = acos(fmin(cs, 1.0));
 			c[0] = c[1] = c[2] = -1;
 		}
 	}
 	for (int k = 0; k < 3; k++)
 		sky[k] = nsky ? sky[k] / nsky : 0;
+	/*
+	** Cualquier otro punto muy brillante (reflejos, nubes al sol) se recorta
+	** al umbral por la misma razon.
+	*/
+	for (int i = 0; i < w * h; i++)
+	{
+		float *c = img->rgb + i * 3;
+		float l = c[0] < 0 ? 0 : lum(c);
+		if (l > hot)
+			for (int k = 0; k < 3; k++)
+				c[k] *= hot / l;
+	}
 	for (int i = 0; i < w * h; i++)
 		if (img->rgb[i * 3] < 0)
 			for (int k = 0; k < 3; k++)
