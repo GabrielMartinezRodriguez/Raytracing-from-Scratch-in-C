@@ -49,6 +49,9 @@ static t_vec4		vec4(simd_float3 v)
 - (void)buildMeshStructure;
 - (void)simStep:(t_sim *)sim dt:(float)dt;
 - (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame;
+- (void)accumulate:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+	first:(BOOL)first;
+- (void)resolveAccum:(id<MTLTexture>)out;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)offscreenTexture;
 - (void)useCamera:(int)index;
@@ -119,6 +122,10 @@ static float	aces(float x)
 	id<MTLTexture>				_accA;
 	id<MTLTexture>				_accB;
 	int							_accumMode;
+	id<MTLTexture>				_accSrc;
+	int							_accCount;
+	float						_focus;
+	float						_aperture;
 	bool						_hasGlass;
 	float						_accumScale;
 	id<MTLBuffer>				_insts;
@@ -171,6 +178,12 @@ static float	aces(float x)
 	_hardware = _device.supportsRaytracing && !(getenv("RT_HW")
 		&& strcmp(getenv("RT_HW"), "0") == 0);
 	_city = getenv("RT_CITY") && atoi(getenv("RT_CITY")) > 1;
+	/*
+	** Profundidad de campo (solo en los videos de calidad): distancia de
+	** enfoque en metros y radio de la apertura (0,006 = un 50 mm a f/4).
+	*/
+	_focus = getenv("RT_FOCUS") ? atof(getenv("RT_FOCUS")) : 0;
+	_aperture = getenv("RT_APERTURE") ? atof(getenv("RT_APERTURE")) : 0;
 	library = [_device newLibraryWithSource:[NSString stringWithFormat:@"%s%s%s",
 		_hardware ? "#define HW_RT 1\n" : "", _city ? "#define MESH_INST 1\n"
 		: "", g_shader_src] options:options error:&error];
@@ -625,6 +638,19 @@ static bool		has_transparency(CGImageRef img)
 
 - (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
 {
+	[self accumulate:out samples:spp frame:frame first:YES];
+	[self resolveAccum:out];
+}
+
+/*
+** Suma spp muestras mas a lo acumulado (first: empieza de cero). Se puede
+** llamar varias veces por imagen moviendo la escena entre medias: asi sale
+** el desenfoque de movimiento de una camara real.
+*/
+
+- (void)accumulate:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+	first:(BOOL)first
+{
 	if (!_accA || _accA.width != out.width || _accA.height != out.height)
 	{
 		_accA = [self privateTexture:MTLPixelFormatRGBA32Float w:out.width
@@ -641,26 +667,36 @@ static bool		has_transparency(CGImageRef img)
 		[warm commit];
 		[warm waitUntilCompleted];
 	}
+	if (first)
+	{
+		_accSrc = _accA;
+		_accCount = 0;
+	}
 	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
-	id<MTLTexture> src = _accA;
-	id<MTLTexture> dst = _accB;
 	for (int s = 0; s < spp; s++)
 	{
-		_frame = frame * 4096 + s;
-		_accumMode = s == 0 ? 1 : 2;
-		[self encodePass:4 to:dst base:src buffer:cmd];
-		id<MTLTexture> t = src;
-		src = dst;
-		dst = t;
+		id<MTLTexture> dst = _accSrc == _accA ? _accB : _accA;
+		_frame = frame * 4096 + _accCount;
+		_accumMode = _accCount == 0 ? 1 : 2;
+		[self encodePass:4 to:dst base:_accSrc buffer:cmd];
+		_accSrc = dst;
+		_accCount++;
 	}
 	_accumMode = 0;
-	_accumScale = 1.0f / spp;
-	[self encodePass:5 to:out base:src buffer:cmd];
-	_accumScale = 0;
 	[cmd commit];
 	[cmd waitUntilCompleted];
 	if (cmd.error)
 		fprintf(stderr, "error GPU: %s\n", cmd.error.localizedDescription.UTF8String);
+}
+
+- (void)resolveAccum:(id<MTLTexture>)out
+{
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	_accumScale = 1.0f / (_accCount > 0 ? _accCount : 1);
+	[self encodePass:5 to:out base:_accSrc buffer:cmd];
+	_accumScale = 0;
+	[cmd commit];
+	[cmd waitUntilCompleted];
 }
 
 /*
@@ -848,8 +884,8 @@ static bool		has_transparency(CGImageRef img)
 	f.sun_color = _sunColor;
 	f.env = _env;
 	f.accum = _accumMode;
-	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0,
-		getenv("RT_DBG") ? atof(getenv("RT_DBG")) : 0, 0);
+	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0, _focus,
+		_accumMode ? _aperture : 0);
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;
@@ -1566,13 +1602,31 @@ static void		render_sim_video(Renderer *renderer, t_sim *sim, int n,
 		"-crf 16 -pix_fmt yuv420p '%s'", w, h, fps, out);
 	FILE *pipe = popen(cmd, "w");
 	void *pixels = malloc(w * h * 4);
+	/*
+	** Obturador (RT_SHUTTER, 0,5 = 180 grados como en cine): durante esa
+	** fraccion de cada imagen la escena se mueve en RT_MB_STEPS pasos y las
+	** muestras se reparten entre ellos.
+	*/
+	float			shutter = getenv("RT_SHUTTER") ? atof(getenv("RT_SHUTTER"))
+		: 0.5f;
+	int				steps = getenv("RT_MB_STEPS") ? atoi(getenv("RT_MB_STEPS"))
+		: 8;
+	float			dt = 1.0f / fps;
+
+	steps = shutter > 0 && steps > 1 ? steps : 1;
 	[renderer pathAt:0 frame:0];
 	[renderer simStep:sim dt:0];
 	for (int i = 0; i < n; i++)
 	{
-		if (i > 0)
-			[renderer simStep:sim dt:1.0f / fps];
-		[renderer renderAccum:texture samples:spp frame:i];
+		for (int k = 0; k < steps; k++)
+		{
+			int part = spp * (k + 1) / steps - spp * k / steps;
+			[renderer accumulate:texture samples:part frame:i first:k == 0];
+			if (steps > 1)
+				[renderer simStep:sim dt:dt * shutter / steps];
+		}
+		[renderer resolveAccum:texture];
+		[renderer simStep:sim dt:steps > 1 ? dt * (1 - shutter) : dt];
 		[texture getBytes:pixels bytesPerRow:w * 4
 			fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
 		fwrite(pixels, 1, w * h * 4, pipe);

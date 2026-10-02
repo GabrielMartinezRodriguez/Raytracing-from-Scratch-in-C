@@ -1154,7 +1154,24 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 		float3 nrm;
 		float3 spc;
 		float rgh;
-		float3 c = trace_gi(f.origin.xyz, d, f, objs, lights, ACCEL_ARGS,
+		float3 o = f.origin.xyz;
+		if (f.extra.w > 0)
+		{
+			/*
+			** Lente fina: el rayo sale de un punto al azar de la apertura y
+			** pasa por el punto de enfoque; lo que no esta a esa distancia
+			** sale desenfocado, como con una camara de verdad.
+			*/
+			uint ls = hash(gid.x * 7919 + gid.y * 104723 + f.frame * 15485863);
+			float r = sqrt(rand01(ls)) * f.extra.w;
+			float a = 2 * M_PI_F * rand01(ls * 7 + 3);
+			float3 fw = normalize(f.forward.xyz);
+			float3 fp = o + d * (f.extra.z / dot(d, fw));
+			o += normalize(f.right.xyz) * (r * cos(a))
+				+ normalize(f.up.xyz) * (r * sin(a));
+			d = normalize(fp - o);
+		}
+		float3 c = trace_gi(o, d, f, objs, lights, ACCEL_ARGS,
 			hash(gid.x * 1973 + gid.y * 9277 + f.frame * 104729), first_t,
 			alb, nrm, spc, rgh);
 		float3 lit = c * (f.env.y > 0 ? f.env.w : GI_EXPOSURE);
