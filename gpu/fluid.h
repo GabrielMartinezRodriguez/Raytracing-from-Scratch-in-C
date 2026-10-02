@@ -36,6 +36,10 @@ typedef struct	s_fluid
 	unsigned	*tri_n;
 	int			ntri;
 	int			tri_cap;
+	float		*wet;
+	int			wet_n;
+	float		wet_cell;
+	simd_float2	wet_lo;
 }				t_fluid;
 
 void			fluid_init(t_fluid *f, float spacing, int cap);

@@ -20,12 +20,13 @@ using namespace raytracing;
 	intersection_function_table<MESH_TAGS> mesh_table, \
 	device const t_gpu_tri *tris, device const GpuMaterial *mats, \
 	device const packed_float3 *mesh_pos, device const float4 *insts, \
-	texture2d<float> env_map
+	texture2d<float> env_map, texture2d<float> wet_map
 # define ACCEL_ARGS accel, table, mesh_accel, mesh_table, tris, mats, \
-	mesh_pos, insts, env_map
+	mesh_pos, insts, env_map, wet_map
 #else
-# define ACCEL_DECL device const t_gpu_node *nodes, texture2d<float> env_map
-# define ACCEL_ARGS nodes, env_map
+# define ACCEL_DECL device const t_gpu_node *nodes, texture2d<float> env_map, \
+	texture2d<float> wet_map
+# define ACCEL_ARGS nodes, env_map, wet_map
 #endif
 
 #include "shared.h"
@@ -486,6 +487,7 @@ static Hit		intersect(float3 o, float3 d, constant t_gpu_frame &f,
 */
 
 constexpr sampler	env_sampler(address::repeat, filter::linear);
+constexpr sampler	wet_sampler(filter::linear, address::clamp_to_edge);
 
 /*
 ** Cielo: con HDRI (f.env.y > 0) se lee la foto de 360 grados en proyeccion
@@ -660,6 +662,27 @@ static Surf		surface(Hit hit, float3 o, float3 d, float cone,
 					0.05f));
 				if (dot(nm, s.ng) > 0.02f)
 					s.n = nm;
+			}
+		}
+		if (f.wet.w > 0 && !s.glass)
+		{
+			/*
+			** Superficie mojada: el agua rellena los poros, asi que la
+			** madera se ve mas oscura y saturada, y la capa de agua la deja
+			** lisa y brillante (Lekner y Dorf). El mapa guarda cuanto se ha
+			** mojado cada punto de la mesa y a que altura esta.
+			*/
+			float2 wuv = (float2(s.p.x, s.p.z) - f.wet.xy) / (f.wet.z * f.wet.w);
+			if (all(wuv > 0) && all(wuv < 1))
+			{
+				float2 wv = wet_map.sample(wet_sampler, wuv, level(0)).rg;
+				float wet = wv.x * smoothstep(0.012f, 0.004f, fabs(s.p.y - wv.y))
+					* smoothstep(0.3f, 0.7f, s.ng.y);
+				s.albedo *= mix(1.0f, 0.45f, wet) * mix(float3(1), s.albedo
+					/ max(max3(s.albedo.x, s.albedo.y, s.albedo.z), 1e-3f),
+					0.25f * wet);
+				s.rough = mix(s.rough, 0.06f, wet);
+				s.n = normalize(mix(s.n, s.ng, wet * 0.8f));
 			}
 		}
 		s.rough = clamp(s.rough, 0.03f, 1.0f);
@@ -1116,6 +1139,7 @@ kernel void		render(texture2d<float, access::write> out [[texture(0)]],
 					device const float4 *insts [[buffer(13)]],
 #endif
 					texture2d<float> env_map [[texture(8)]],
+					texture2d<float> wet_map [[texture(9)]],
 #ifdef HW_RT
 #else
 					device const t_gpu_node *nodes [[buffer(3)]],

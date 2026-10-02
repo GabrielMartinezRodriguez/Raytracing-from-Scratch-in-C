@@ -116,6 +116,7 @@ typedef struct	s_gpu_frame
 	t_vec4		sun_color;
 	t_vec4		env;
 	t_vec4		extra;
+	t_vec4		wet;
 }				t_gpu_frame;
 
 #endif

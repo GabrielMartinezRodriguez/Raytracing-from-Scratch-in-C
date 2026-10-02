@@ -156,6 +156,8 @@ static float	aces(float x)
 	simd_float4					_sceneMin;
 	simd_float4					_sceneMax;
 	id<MTLTexture>				_envTex;
+	id<MTLTexture>				_wetTex;
+	simd_float4					_wet;
 	simd_float4					_sunDir;
 	simd_float4					_sunColor;
 	simd_float4					_env;
@@ -257,6 +259,10 @@ static float	aces(float x)
 		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
 		width:1 height:1 mipmapped:NO];
 	_envTex = [_device newTextureWithDescriptor:ed];
+	MTLTextureDescriptor *wd = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRG32Float
+		width:1 height:1 mipmapped:NO];
+	_wetTex = [_device newTextureWithDescriptor:wd];
 	[self useCamera:0];
 	return (self);
 }
@@ -627,6 +633,53 @@ static bool		has_transparency(CGImageRef img)
 	sim_advance(sim, dt);
 	sim_apply(sim, _triObj, _restPos, _restTris, _meshPos.contents,
 		_tris.contents, _ntris);
+	t_fluid *fl = &sim->fluid;
+	if (fl->wet)
+	{
+		if (_wetTex.width != (NSUInteger)fl->wet_n)
+		{
+			MTLTextureDescriptor *wd = [MTLTextureDescriptor
+				texture2DDescriptorWithPixelFormat:MTLPixelFormatRG32Float
+				width:fl->wet_n height:fl->wet_n mipmapped:NO];
+			_wetTex = [_device newTextureWithDescriptor:wd];
+		}
+		/*
+		** El borde de una mancha de agua es suave: se difumina la humedad
+		** (dos pasadas de caja 5x5); la altura se deja tal cual.
+		*/
+		int wn = fl->wet_n;
+		static float *blur;
+		static float *tmp;
+		if (!blur)
+		{
+			blur = malloc(sizeof(float) * 2 * wn * wn);
+			tmp = malloc(sizeof(float) * wn * wn);
+		}
+		memcpy(blur, fl->wet, sizeof(float) * 2 * wn * wn);
+		for (int pass = 0; pass < 2; pass++)
+		{
+			for (int z = 0; z < wn; z++)
+				for (int x = 0; x < wn; x++)
+				{
+					float sum = 0;
+					for (int k = -2; k <= 2; k++)
+						sum += blur[(z * wn + MIN(MAX(x + k, 0), wn - 1)) * 2];
+					tmp[z * wn + x] = sum / 5;
+				}
+			for (int z = 0; z < wn; z++)
+				for (int x = 0; x < wn; x++)
+				{
+					float sum = 0;
+					for (int k = -2; k <= 2; k++)
+						sum += tmp[MIN(MAX(z + k, 0), wn - 1) * wn + x];
+					blur[(z * wn + x) * 2] = sum / 5;
+				}
+		}
+		[_wetTex replaceRegion:MTLRegionMake2D(0, 0, wn, wn)
+			mipmapLevel:0 withBytes:blur bytesPerRow:wn * 8];
+		_wet = simd_make_float4(fl->wet_lo.x, fl->wet_lo.y, fl->wet_cell,
+			fl->wet_n);
+	}
 	[self buildMeshStructure];
 }
 
@@ -884,6 +937,7 @@ static bool		has_transparency(CGImageRef img)
 	f.sun_color = _sunColor;
 	f.env = _env;
 	f.accum = _accumMode;
+	f.wet = _wet;
 	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0, _focus,
 		_accumMode ? _aperture : 0);
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
@@ -921,6 +975,7 @@ static bool		has_transparency(CGImageRef img)
 	[enc setTexture:(gi ? _gRough : base) atIndex:6];
 	[enc setTexture:(gi ? _gSpec : base) atIndex:7];
 	[enc setTexture:_envTex atIndex:8];
+	[enc setTexture:_wetTex atIndex:9];
 	if (pass == 3 || pass == 4)
 	{
 		f.prev_origin = _hasPrev ? _prev.origin : f.origin;

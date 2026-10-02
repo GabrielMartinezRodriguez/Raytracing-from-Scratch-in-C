@@ -145,6 +145,38 @@ static void		neighbors(t_fluid *f)
 	free(next);
 }
 
+/*
+** Mapa de humedad (rejilla vista desde arriba): cada celda guarda cuanto
+** esta mojada (0-1) y la altura de la superficie. Una particula moja un
+** circulo del tamano de su radio.
+*/
+
+static void		mark_wet(t_fluid *f, simd_float3 p)
+{
+	float	r = f->d0 * 0.9f;
+	int		rc = (int)ceilf(r / f->wet_cell);
+	int		cx = (int)((p.x - f->wet_lo.x) / f->wet_cell);
+	int		cz = (int)((p.z - f->wet_lo.y) / f->wet_cell);
+	float	y = p.y - f->d0 * 0.5f;
+
+	for (int z = cz - rc; z <= cz + rc; z++)
+		for (int x = cx - rc; x <= cx + rc; x++)
+		{
+			if (x < 0 || z < 0 || x >= f->wet_n || z >= f->wet_n)
+				continue ;
+			float dx = (x + 0.5f) * f->wet_cell + f->wet_lo.x - p.x;
+			float dz = (z + 0.5f) * f->wet_cell + f->wet_lo.y - p.z;
+			float k = 1 - sqrtf(dx * dx + dz * dz) / r;
+			if (k <= 0)
+				continue ;
+			float *c = f->wet + (z * f->wet_n + x) * 2;
+			if (c[0] > 0.05f && fabsf(c[1] - y) > 0.01f && y < c[1])
+				continue ;
+			c[0] = fmaxf(c[0], fminf(1, k * 2));
+			c[1] = y;
+		}
+}
+
 void			fluid_step(t_fluid *f, t_world *w, float dt)
 {
 	float	h = dt / SUBSTEPS;
@@ -233,6 +265,14 @@ void			fluid_step(t_fluid *f, t_world *w, float dt)
 				f->v[i] -= vt * WALL_FRICTION;
 			}
 		}
+		/*
+		** Marcas de humedad: donde una particula toca una superficie
+		** horizontal, esa zona queda mojada (y se apunta su altura).
+		*/
+		if (f->wet)
+			for (int i = 0; i < f->n; i++)
+				if (f->hitn[i].y > 0.5f)
+					mark_wet(f, f->p[i]);
 		/*
 		** Viscosidad XSPH: cada particula se acerca a la velocidad media de
 		** sus vecinas (el agua se mueve "en bloque").
