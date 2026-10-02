@@ -10,13 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include "sim.h"
+#include "fracture.h"
 
 enum { SIM_NONE, SIM_FRUTAS, SIM_LLUVIA, SIM_VIENTO, SIM_TELA, SIM_ROTURA,
 	SIM_LIQUIDO };
 
 #define FLUID_TRIS 450000
 
-#define SHARDS 14
+#define SHARDS 20
 
 #define CLOTH_N 100
 #define CLOTH_THICK 0.006f
@@ -298,20 +299,18 @@ static void		prefracture(t_sim *s, t_gpu_mesh *m)
 		snprintf(m->obj_names[m->nobjs++], 64, "vasija_trozo_%02d", k);
 	}
 	s->nshards = SHARDS;
-	for (size_t i = 0; i < m->ntris; i++)
-	{
-		if (m->tri_obj[i] != (uint32_t)vase)
-			continue ;
-		simd_float3 c = simd_make_float3(
-			m->pos[i * 9] + m->pos[i * 9 + 3] + m->pos[i * 9 + 6],
-			m->pos[i * 9 + 1] + m->pos[i * 9 + 4] + m->pos[i * 9 + 7],
-			m->pos[i * 9 + 2] + m->pos[i * 9 + 5] + m->pos[i * 9 + 8]) / 3;
-		int best = 0;
-		for (int k = 1; k < SHARDS; k++)
-			if (simd_distance(c, seeds[k]) < simd_distance(c, seeds[best]))
-				best = k;
-		m->tri_obj[i] = s->shard_obj[best];
-	}
+	/*
+	** Cara de rotura: ceramica sin esmaltar, blanca rota y mate.
+	*/
+	m->mats = realloc(m->mats, sizeof(t_mesh_material) * (m->nmats + 1));
+	t_mesh_material *mat = &m->mats[m->nmats];
+	memset(mat, 0, sizeof(*mat));
+	snprintf(mat->name, sizeof(mat->name), "ceramica_rota");
+	mat->kd = simd_make_float4(0.80f, 0.76f, 0.70f, 0);
+	mat->roughness = 0.9f;
+	int cracks = fracture_object(m, vase, seeds, SHARDS, s->shard_obj,
+		m->nmats++);
+	printf("jarron: %d trozos, %d bordes de rotura\n", SHARDS, cracks);
 	s->shard_tris = malloc(sizeof(float *) * SHARDS);
 	s->shard_ntris = malloc(sizeof(int) * SHARDS);
 	for (int k = 0; k < SHARDS; k++)
@@ -412,9 +411,9 @@ static void		maybe_break(t_sim *s)
 		simd_float3 out = simd_normalize(sh->pos - vcenter
 			+ simd_make_float3(0, 0.02f, 0));
 		sh->vel = pre * 0.45f + simd_cross(v->ang, sh->pos - v->pos)
-			+ out * (0.6f + frand(&seed) * 0.9f);
+			+ out * (0.3f + frand(&seed) * 0.6f);
 		sh->ang = simd_make_float3(frand(&seed) - 0.5f, frand(&seed) - 0.5f,
-			frand(&seed) - 0.5f) * 14;
+			frand(&seed) - 0.5f) * 9;
 		sh->restitution = 0.15f;
 		sh->friction = 0.6f;
 		s->obj_body[s->shard_obj[k]] = b;

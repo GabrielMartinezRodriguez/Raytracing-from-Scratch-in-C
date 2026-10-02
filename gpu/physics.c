@@ -19,6 +19,7 @@
 
 #define SLOP 0.001f
 #define BAUMGARTE 0.25f
+#define MAX_PUSH 0.4f
 #define SLEEP_SPEED 0.04f
 #define SLEEP_TIME 0.6f
 #define ROLLING 3.0f
@@ -514,8 +515,13 @@ static void		solve(t_world *w, float dt)
 		float vn = simd_dot(point_vel(a, ra) - (c->b >= 0
 			? point_vel(b, rb) : simd_make_float3(0, 0, 0)), c->n);
 		float e = fmaxf(a->restitution, c->b >= 0 ? b->restitution : 0);
+		/*
+		** La correccion de solape se limita a MAX_PUSH m/s: si no, con
+		** pasos muy cortos (desenfoque de movimiento) dos piezas que se
+		** tocan al nacer saldrian disparadas.
+		*/
 		c->bias = (vn < -0.8f ? -e * vn : 0)
-			+ BAUMGARTE / dt * fmaxf(c->depth - SLOP, 0);
+			+ fminf(BAUMGARTE / dt * fmaxf(c->depth - SLOP, 0), MAX_PUSH);
 	}
 	for (int it = 0; it < w->iterations; it++)
 		for (int i = 0; i < w->ncontacts; i++)
