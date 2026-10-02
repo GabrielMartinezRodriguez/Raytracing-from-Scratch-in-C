@@ -31,6 +31,7 @@ typedef struct	s_obj
 	size_t		capvt;
 	size_t		capvn;
 	unsigned int	material;
+	uint32_t	object;
 }				t_obj;
 
 typedef struct	s_corner
@@ -180,12 +181,17 @@ static t_mesh_material	*new_material(t_gpu_mesh *mesh, const char *name)
 	memset(m, 0, sizeof(*m));
 	snprintf(m->name, sizeof(m->name), "%s", name);
 	m->kd = simd_make_float4(0.8f, 0.8f, 0.8f, 0);
+	m->roughness = 0.9f;
+	m->metallic = 0;
 	return (m);
 }
 
 /*
 ** Las rutas del .mtl de San Miguel vienen con barras de Windows.
 */
+
+static void			map_path(const char *p, const char *end, const char *dir,
+						char *out, size_t len);
 
 static void			load_mtl(t_gpu_mesh *mesh, const char *path, const char *dir)
 {
@@ -219,15 +225,57 @@ static void			load_mtl(t_gpu_mesh *mesh, const char *path, const char *dir)
 			m->kd = simd_make_float4(r, g, b, 0);
 		}
 		else if (m && end - p > 7 && strncmp(p, "map_Kd", 6) == 0)
+			map_path(p + 6, end, dir, m->texture, sizeof(m->texture));
+		else if (m && end - p > 7 && (strncmp(p, "map_Bump", 8) == 0
+			|| strncmp(p, "map_bump", 8) == 0 || strncmp(p, "norm ", 5) == 0))
+			map_path(p + (p[0] == 'n' ? 4 : 8), end, dir, m->normal_map,
+				sizeof(m->normal_map));
+		else if (m && end - p > 7 && strncmp(p, "map_Pr", 6) == 0)
+			map_path(p + 6, end, dir, m->rough_map, sizeof(m->rough_map));
+		else if (m && end - p > 7 && strncmp(p, "map_Pm", 6) == 0)
+			map_path(p + 6, end, dir, m->metal_map, sizeof(m->metal_map));
+		else if (m && end - p > 3 && p[0] == 'P' && p[1] == 'r' && p[2] == ' ')
 		{
-			read_name(p + 6, end, file, sizeof(file));
-			for (char *c = file; *c; c++)
-				if (*c == '\\')
-					*c = '/';
-			snprintf(m->texture, sizeof(m->texture), "%s/%s", dir, file);
+			const char *q = p + 2;
+			m->roughness = parse_float(&q, end);
+		}
+		else if (m && end - p > 3 && p[0] == 'P' && p[1] == 'm' && p[2] == ' ')
+		{
+			const char *q = p + 2;
+			m->metallic = parse_float(&q, end);
 		}
 	}
 	munmap((void *)data, size);
+}
+
+/*
+** Ruta de un mapa del .mtl: salta opciones como "-bm 1.0" y convierte las
+** barras de Windows.
+*/
+
+static void			map_path(const char *p, const char *end, const char *dir,
+						char *out, size_t len)
+{
+	char	file[1024];
+	char	*name = file;
+
+	read_name(p, end, file, sizeof(file));
+	while (*name == '-')
+	{
+		while (*name && *name != ' ')
+			name++;
+		while (*name == ' ')
+			name++;
+		while (*name && *name != ' ' && (*name == '.' || *name == '-'
+			|| (*name >= '0' && *name <= '9')))
+			name++;
+		while (*name == ' ')
+			name++;
+	}
+	for (char *c = name; *c; c++)
+		if (*c == '\\')
+			*c = '/';
+	snprintf(out, len, "%s/%s", dir, name);
 }
 
 static unsigned int	find_material(t_gpu_mesh *mesh, const char *name)
@@ -278,6 +326,7 @@ static void			add_triangle(t_gpu_mesh *mesh, t_obj *obj, t_corner *c)
 		mesh->cap = mesh->cap ? mesh->cap * 2 : 1 << 20;
 		mesh->tris = realloc(mesh->tris, sizeof(t_gpu_tri) * mesh->cap);
 		mesh->pos = realloc(mesh->pos, sizeof(float) * 9 * mesh->cap);
+		mesh->tri_obj = realloc(mesh->tri_obj, sizeof(uint32_t) * mesh->cap);
 	}
 	t = &mesh->tris[mesh->ntris];
 	pos = &mesh->pos[mesh->ntris * 9];
@@ -296,6 +345,7 @@ static void			add_triangle(t_gpu_mesh *mesh, t_obj *obj, t_corner *c)
 			? pack_normal(obj->vn[c[k].vn - 1]) : 0;
 	}
 	t->material = obj->material;
+	mesh->tri_obj[mesh->ntris - 1] = obj->object;
 }
 
 static void			dir_of(const char *path, char *out, size_t len)
@@ -330,6 +380,12 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 	memset(&obj, 0, sizeof(obj));
 	if (mesh->nmats == 0)
 		new_material(mesh, "(por defecto)");
+	if (mesh->nobjs == 0)
+	{
+		mesh->obj_names = calloc(1, 64);
+		snprintf(mesh->obj_names[0], 64, "(modelo)");
+		mesh->nobjs = 1;
+	}
 	dir_of(path, dir, sizeof(dir));
 	end = data + size;
 	for (p = data; p < end; p = next_line(p, end))
@@ -352,7 +408,12 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 			GROW(obj.vt, obj.nvt, obj.capvt);
 			float u = parse_float(&q, end);
 			float v = parse_float(&q, end);
-			obj.vt[obj.nvt++] = simd_make_float2(u, v);
+			/*
+			** El .obj mide v desde abajo y la GPU lee las texturas desde
+			** arriba: sin darle la vuelta, cada parte del modelo leia la
+			** region equivocada de su textura.
+			*/
+			obj.vt[obj.nvt++] = simd_make_float2(u, 1 - v);
 		}
 		else if (p[0] == 'v' && p[1] == 'n')
 		{
@@ -374,6 +435,17 @@ long				load_obj(t_gpu_mesh *mesh, const char *path)
 				add_triangle(mesh, &obj, c);
 				c[1] = c[2];
 			}
+		}
+		else if ((p[0] == 'o' || p[0] == 'g') && (p[1] == ' ' || p[1] == '\t'))
+		{
+			/*
+			** Cada "o nombre" (u "g") abre un objeto: la fisica mueve los
+			** triangulos de cada objeto por separado.
+			*/
+			read_name(p + 1, end, name, sizeof(name));
+			mesh->obj_names = realloc(mesh->obj_names, 64 * (mesh->nobjs + 1));
+			snprintf(mesh->obj_names[mesh->nobjs], 64, "%s", name);
+			obj.object = mesh->nobjs++;
 		}
 		else if (strncmp(p, "usemtl", 6) == 0)
 		{
@@ -405,10 +477,10 @@ typedef struct	s_cache_header
 	int64_t		obj_mtime;
 	uint64_t	ntris;
 	int32_t		nmats;
-	int32_t		pad;
+	int32_t		nobjs;
 }				t_cache_header;
 
-static const char	g_magic[8] = "RTMESH1";
+static const char	g_magic[8] = "RTMESH4";
 
 static void			obj_stat(const char *path, uint64_t *size, int64_t *mtime)
 {
@@ -435,10 +507,13 @@ static int			save_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	obj_stat(obj, &h.obj_size, &h.obj_mtime);
 	h.ntris = mesh->ntris;
 	h.nmats = mesh->nmats;
+	h.nobjs = mesh->nobjs;
 	fwrite(&h, sizeof(h), 1, f);
 	fwrite(mesh->mats, sizeof(t_mesh_material), mesh->nmats, f);
 	fwrite(mesh->pos, sizeof(float) * 9, mesh->ntris, f);
 	fwrite(mesh->tris, sizeof(t_gpu_tri), mesh->ntris, f);
+	fwrite(mesh->obj_names, 64, mesh->nobjs, f);
+	fwrite(mesh->tri_obj, sizeof(uint32_t), mesh->ntris, f);
 	fclose(f);
 	return (0);
 }
@@ -457,7 +532,8 @@ static long			load_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	if (size < sizeof(*h) || memcmp(h->magic, g_magic, 8) != 0
 		|| h->obj_size != osize || h->obj_mtime != omtime
 		|| size != sizeof(*h) + h->nmats * sizeof(t_mesh_material)
-		+ h->ntris * (sizeof(float) * 9 + sizeof(t_gpu_tri)))
+		+ h->ntris * (sizeof(float) * 9 + sizeof(t_gpu_tri) + sizeof(uint32_t))
+		+ (size_t)h->nobjs * 64)
 	{
 		munmap(data, size);
 		return (-1);
@@ -470,6 +546,12 @@ static long			load_cache(t_gpu_mesh *mesh, const char *obj, const char *cache)
 	mesh->cap = h->ntris;
 	mesh->pos = (float *)(data + sizeof(*h) + sizeof(t_mesh_material) * h->nmats);
 	mesh->tris = (t_gpu_tri *)((char *)mesh->pos + sizeof(float) * 9 * h->ntris);
+	mesh->nobjs = h->nobjs;
+	mesh->obj_names = malloc((size_t)h->nobjs * 64);
+	memcpy(mesh->obj_names, (char *)(mesh->tris + h->ntris),
+		(size_t)h->nobjs * 64);
+	mesh->tri_obj = (uint32_t *)((char *)(mesh->tris + h->ntris)
+		+ (size_t)h->nobjs * 64);
 	mesh->map = data;
 	mesh->map_size = size;
 	return ((long)mesh->ntris);
@@ -499,7 +581,9 @@ void				free_mesh_data(t_gpu_mesh *mesh)
 	{
 		free(mesh->pos);
 		free(mesh->tris);
+		free(mesh->tri_obj);
 	}
+	mesh->tri_obj = NULL;
 	mesh->map = NULL;
 	mesh->pos = NULL;
 	mesh->tris = NULL;

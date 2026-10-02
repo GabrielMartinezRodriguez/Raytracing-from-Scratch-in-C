@@ -19,6 +19,8 @@
 #include "scene_export.h"
 #include "bvh.h"
 #include "obj_loader.h"
+#include "hdri.h"
+#include "sim.h"
 #include "shader_src.h"
 
 enum { KEY_A = 0, KEY_S = 1, KEY_D = 2, KEY_Q = 12, KEY_W = 13, KEY_E = 14,
@@ -40,9 +42,16 @@ static t_vec4		vec4(simd_float3 v)
 @property (nonatomic) float moveSpeed;
 @property (nonatomic) bool temporalOn;
 @property (nonatomic) bool giOn;
+- (void)loadEnv:(const char *)path rotation:(float)deg exposure:(float)ev;
 - (instancetype)initWithScene:(t_gpu_scene *)scene mesh:(t_gpu_mesh *)mesh;
 - (void)buildMesh:(t_gpu_mesh *)mesh alpha:(id<MTLFunction>)alpha_fn;
 - (void)buildInstances:(t_gpu_mesh *)mesh;
+- (void)buildMeshStructure;
+- (void)simStep:(t_sim *)sim dt:(float)dt;
+- (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame;
+- (void)accumulate:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+	first:(BOOL)first;
+- (void)resolveAccum:(id<MTLTexture>)out;
 - (void)encodeTo:(id<MTLTexture>)texture buffer:(id<MTLCommandBuffer>)cmd;
 - (id<MTLTexture>)offscreenTexture;
 - (void)useCamera:(int)index;
@@ -59,6 +68,8 @@ static t_vec4		vec4(simd_float3 v)
 - (void)encodePass:(int)pass to:(id<MTLTexture>)texture base:(id<MTLTexture>)base buffer:(id<MTLCommandBuffer>)cmd;
 - (void)cameraMatrices:(simd_float4x4 *)view proj:(simd_float4x4 *)proj aspect:(float)aspect;
 - (t_gpu_frame)frame;
+- (simd_float3)right;
+- (simd_float3)forward;
 - (void)buildAccel:(id<MTLFunction>)shape_fn;
 @end
 
@@ -105,6 +116,18 @@ static float	aces(float x)
 	id<MTLIntersectionFunctionTable>	_table;
 	id<MTLAccelerationStructure>	_meshAccel;
 	id<MTLAccelerationStructure>	_meshPrim;
+	uint32_t					*_triObj;
+	float						*_restPos;
+	t_gpu_tri					*_restTris;
+	id<MTLTexture>				_accA;
+	id<MTLTexture>				_accB;
+	int							_accumMode;
+	id<MTLTexture>				_accSrc;
+	int							_accCount;
+	float						_focus;
+	float						_aperture;
+	bool						_hasGlass;
+	float						_accumScale;
 	id<MTLBuffer>				_insts;
 	int							_ninsts;
 	id<MTLIntersectionFunctionTable>	_meshTable;
@@ -132,6 +155,12 @@ static float	aces(float x)
 	float						_pathYaw;
 	simd_float4					_sceneMin;
 	simd_float4					_sceneMax;
+	id<MTLTexture>				_envTex;
+	id<MTLTexture>				_wetTex;
+	simd_float4					_wet;
+	simd_float4					_sunDir;
+	simd_float4					_sunColor;
+	simd_float4					_env;
 	double						_gpuMs;
 }
 
@@ -151,6 +180,12 @@ static float	aces(float x)
 	_hardware = _device.supportsRaytracing && !(getenv("RT_HW")
 		&& strcmp(getenv("RT_HW"), "0") == 0);
 	_city = getenv("RT_CITY") && atoi(getenv("RT_CITY")) > 1;
+	/*
+	** Profundidad de campo (solo en los videos de calidad): distancia de
+	** enfoque en metros y radio de la apertura (0,006 = un 50 mm a f/4).
+	*/
+	_focus = getenv("RT_FOCUS") ? atof(getenv("RT_FOCUS")) : 0;
+	_aperture = getenv("RT_APERTURE") ? atof(getenv("RT_APERTURE")) : 0;
 	library = [_device newLibraryWithSource:[NSString stringWithFormat:@"%s%s%s",
 		_hardware ? "#define HW_RT 1\n" : "", _city ? "#define MESH_INST 1\n"
 		: "", g_shader_src] options:options error:&error];
@@ -220,6 +255,14 @@ static float	aces(float x)
 	_lights = [_device newBufferWithBytes:scene->lights
 		length:sizeof(t_gpu_light) * (scene->nlights + 1)
 		options:MTLResourceStorageModeShared];
+	MTLTextureDescriptor *ed = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+		width:1 height:1 mipmapped:NO];
+	_envTex = [_device newTextureWithDescriptor:ed];
+	MTLTextureDescriptor *wd = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRG32Float
+		width:1 height:1 mipmapped:NO];
+	_wetTex = [_device newTextureWithDescriptor:wd];
 	[self useCamera:0];
 	return (self);
 }
@@ -317,6 +360,11 @@ typedef struct	s_host_material
 {
 	simd_float4		kd;
 	MTLResourceID	diffuse;
+	MTLResourceID	normal;
+	MTLResourceID	rough;
+	MTLResourceID	metal;
+	float			roughness;
+	float			metallic;
 	uint32_t		flags;
 	uint32_t		pad;
 }				t_host_material;
@@ -362,33 +410,52 @@ static bool		has_transparency(CGImageRef img)
 	bool				*alpha = calloc(nm, sizeof(bool));
 	id<MTLDevice>		device = _device;
 
-	NSMutableArray *slots = [NSMutableArray arrayWithCapacity:nm];
-	for (int i = 0; i < nm; i++)
+	/*
+	** 4 mapas por material (color, relieve, rugosidad, metalicidad). El color
+	** se carga en sRGB; los demas son datos y van en lineal.
+	*/
+	int njobs = nm * 4;
+	NSMutableArray *slots = [NSMutableArray arrayWithCapacity:njobs];
+	for (int i = 0; i < njobs; i++)
 		[slots addObject:[NSNull null]];
-	dispatch_apply(nm, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-		^(size_t i) {
-		if (!mesh->mats[i].texture[0])
+	dispatch_apply(njobs, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+		^(size_t job) {
+		size_t i = job / 4;
+		int kind = (int)(job % 4);
+		const char *file = kind == 0 ? mesh->mats[i].texture
+			: kind == 1 ? mesh->mats[i].normal_map
+			: kind == 2 ? mesh->mats[i].rough_map : mesh->mats[i].metal_map;
+		if (!file[0])
 			return ;
-		NSURL *url = [NSURL fileURLWithPath:@(mesh->mats[i].texture)];
+		NSURL *url = [NSURL fileURLWithPath:@(file)];
 		CGImageSourceRef src = CGImageSourceCreateWithURL(
 			(__bridge CFURLRef)url, NULL);
 		if (!src)
+		{
+			fprintf(stderr, "aviso: no se pudo abrir %s\n", file);
 			return ;
+		}
 		CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
 		CFRelease(src);
 		if (!img)
+		{
+			fprintf(stderr, "aviso: no se pudo decodificar %s\n", file);
 			return ;
-		alpha[i] = has_transparency(img);
+		}
+		if (kind == 0)
+			alpha[i] = has_transparency(img);
 		MTKTextureLoader *loader = [[MTKTextureLoader alloc]
 			initWithDevice:device];
 		id<MTLTexture> tex = [loader newTextureWithCGImage:img options:@{
-			MTKTextureLoaderOptionSRGB: @YES,
+			MTKTextureLoaderOptionSRGB: @(kind == 0),
 			MTKTextureLoaderOptionGenerateMipmaps: @YES,
 			MTKTextureLoaderOptionTextureStorageMode: @(MTLStorageModePrivate)}
 			error:nil];
 		CGImageRelease(img);
 		if (tex)
-			@synchronized (slots) { slots[i] = tex; }
+			@synchronized (slots) { slots[job] = tex; }
+		else
+			fprintf(stderr, "aviso: no se pudo subir a la GPU %s\n", file);
 	});
 	id<MTLBuffer> mats = [_device newBufferWithLength:sizeof(t_host_material)
 		* nm options:MTLResourceStorageModeShared];
@@ -399,17 +466,36 @@ static bool		has_transparency(CGImageRef img)
 	{
 		memset(&hm[i], 0, sizeof(hm[i]));
 		hm[i].kd = mesh->mats[i].kd;
-		if (slots[i] != [NSNull null])
+		hm[i].roughness = mesh->mats[i].roughness;
+		hm[i].metallic = mesh->mats[i].metallic;
+		uint32_t bits[4] = {MAT_TEXTURE, MAT_NORMAL, MAT_ROUGH, MAT_METAL};
+		for (int k = 0; k < 4; k++)
 		{
-			id<MTLTexture> tex = slots[i];
-			hm[i].diffuse = tex.gpuResourceID;
-			hm[i].flags = MAT_TEXTURE | (alpha[i] ? MAT_ALPHA : 0);
+			if (slots[i * 4 + k] == [NSNull null])
+				continue ;
+			id<MTLTexture> tex = slots[i * 4 + k];
+			if (k == 0)
+				hm[i].diffuse = tex.gpuResourceID;
+			else if (k == 1)
+				hm[i].normal = tex.gpuResourceID;
+			else if (k == 2)
+				hm[i].rough = tex.gpuResourceID;
+			else
+				hm[i].metal = tex.gpuResourceID;
+			hm[i].flags |= bits[k];
 			[texs addObject:tex];
 			ntex++;
-			nalpha += alpha[i];
 		}
-		else
+		if (!(hm[i].flags & MAT_TEXTURE))
 			alpha[i] = false;
+		if (mesh->mats[i].kd.w > 0.5f)
+		{
+			hm[i].flags |= MAT_GLASS;
+			_hasGlass = true;
+		}
+		if (alpha[i])
+			hm[i].flags |= MAT_ALPHA;
+		nalpha += alpha[i];
 	}
 	_mats = mats;
 	_textures = texs;
@@ -433,17 +519,72 @@ static bool		has_transparency(CGImageRef img)
 	t_gpu_tri *tris = _tris.contents;
 	size_t io = 0;
 	size_t ia = nop;
+	_triObj = malloc(sizeof(uint32_t) * (n + 1));
 	for (size_t i = 0; i < n; i++)
 	{
 		size_t k = alpha[mesh->tris[i].material] ? ia++ : io++;
 		memcpy(&pos[k * 9], &mesh->pos[i * 9], sizeof(float) * 9);
 		tris[k] = mesh->tris[i];
+		_triObj[k] = mesh->tri_obj ? mesh->tri_obj[i] : 0;
 	}
+	/*
+	** Pose de reposo (para animar: cada imagen parte de aqui).
+	*/
+	_restPos = malloc(sizeof(float) * 9 * n);
+	_restTris = malloc(sizeof(t_gpu_tri) * n);
+	memcpy(_restPos, pos, sizeof(float) * 9 * n);
+	memcpy(_restTris, tris, sizeof(t_gpu_tri) * n);
 	free(alpha);
 	free_mesh_data(mesh);
 	_ntris = (int)n;
 	_nopaque = (int)nop;
-	NSMutableArray *geos = [NSMutableArray array];
+	[self buildMeshStructure];
+	[self buildInstances:mesh];
+	uint32_t base = (uint32_t)nop;
+	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
+		options:MTLResourceStorageModeShared];
+	MTLIntersectionFunctionTableDescriptor *tdesc =
+		[MTLIntersectionFunctionTableDescriptor new];
+	tdesc.functionCount = 1;
+	_meshTable = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
+	[_meshTable setFunction:[_pipeline functionHandleWithFunction:alpha_fn]
+		atIndex:0];
+	[_meshTable setBuffer:_tris offset:0 atIndex:0];
+	[_meshTable setBuffer:_mats offset:0 atIndex:1];
+	[_meshTable setBuffer:_meshBase offset:0 atIndex:2];
+	printf("malla: %zu triangulos (%zu opacos, %zu con transparencia), "
+		"estructura de %.0f MB en %.0f ms\n", n, nop, n - nop,
+		_meshPrim.size / 1048576.0, (CACurrentMediaTime() - t0) * 1000);
+}
+
+/*
+** Recorrido de prueba: desde la camara 1 avanza 2,5 m y gira 0,25 rad.
+** Deterministico por t (0..1) para poder comparar con las referencias.
+*/
+
+- (void)pathAt:(float)t frame:(unsigned int)frame
+{
+	if (getenv("RT_STATIC"))
+		t = 0.5f;
+	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
+	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
+	float len = getenv("RT_PATH_LEN") ? atof(getenv("RT_PATH_LEN")) : 1;
+	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm * len;
+	_yaw = _pathYaw + 0.25f * ty * len;
+	_frame = frame;
+}
+
+/*
+** Estructura de aceleracion de la malla con las posiciones actuales del
+** buffer: se llama al cargar y en cada imagen de una simulacion.
+*/
+
+- (void)buildMeshStructure
+{
+	size_t			n = _ntris;
+	size_t			nop = _nopaque;
+	NSMutableArray	*geos = [NSMutableArray array];
+
 	for (int k = 0; k < 2; k++)
 	{
 		size_t first = k == 0 ? 0 : nop;
@@ -465,52 +606,150 @@ static bool		has_transparency(CGImageRef img)
 	desc.geometryDescriptors = geos;
 	MTLAccelerationStructureSizes sizes =
 		[_device accelerationStructureSizesWithDescriptor:desc];
-	_meshPrim = [_device newAccelerationStructureWithSize:
+	id<MTLAccelerationStructure> as = [_device newAccelerationStructureWithSize:
 		sizes.accelerationStructureSize];
 	id<MTLBuffer> scratch = [_device newBufferWithLength:
 		sizes.buildScratchBufferSize options:MTLResourceStorageModePrivate];
 	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
 	id<MTLAccelerationStructureCommandEncoder> enc =
 		[cmd accelerationStructureCommandEncoder];
-	[enc buildAccelerationStructure:_meshPrim descriptor:desc
+	[enc buildAccelerationStructure:as descriptor:desc
 		scratchBuffer:scratch scratchBufferOffset:0];
 	[enc endEncoding];
 	[cmd commit];
 	[cmd waitUntilCompleted];
-	[self buildInstances:mesh];
-	uint32_t base = (uint32_t)nop;
-	_meshBase = [_device newBufferWithBytes:&base length:sizeof(base)
-		options:MTLResourceStorageModeShared];
-	MTLIntersectionFunctionTableDescriptor *tdesc =
-		[MTLIntersectionFunctionTableDescriptor new];
-	tdesc.functionCount = 1;
-	_meshTable = [_pipeline newIntersectionFunctionTableWithDescriptor:tdesc];
-	[_meshTable setFunction:[_pipeline functionHandleWithFunction:alpha_fn]
-		atIndex:0];
-	[_meshTable setBuffer:_tris offset:0 atIndex:0];
-	[_meshTable setBuffer:_mats offset:0 atIndex:1];
-	[_meshTable setBuffer:_meshBase offset:0 atIndex:2];
-	printf("malla: %zu triangulos (%zu opacos, %zu con transparencia), "
-		"estructura de %.0f MB en %.0f ms\n", n, nop, n - nop,
-		sizes.accelerationStructureSize / 1048576.0,
-		(CACurrentMediaTime() - t0) * 1000);
+	if (_meshAccel == _meshPrim)
+		_meshAccel = as;
+	_meshPrim = as;
 }
 
 /*
-** Recorrido de prueba: desde la camara 1 avanza 2,5 m y gira 0,25 rad.
-** Deterministico por t (0..1) para poder comparar con las referencias.
+** Un paso de simulacion: fisica, vertices movidos a su sitio y estructura
+** de aceleracion reconstruida.
 */
 
-- (void)pathAt:(float)t frame:(unsigned int)frame
+- (void)simStep:(t_sim *)sim dt:(float)dt
 {
-	if (getenv("RT_STATIC"))
-		t = 0.5f;
-	float tm = getenv("RT_ONLY_YAW") ? 0.5f : t;
-	float ty = getenv("RT_ONLY_MOVE") ? 0.5f : t;
-	float len = getenv("RT_PATH_LEN") ? atof(getenv("RT_PATH_LEN")) : 1;
-	_position = _pathStart + simd_make_float3(-2.5f, 0, 0.3f) * tm * len;
-	_yaw = _pathYaw + 0.25f * ty * len;
-	_frame = frame;
+	sim_advance(sim, dt);
+	sim_apply(sim, _triObj, _restPos, _restTris, _meshPos.contents,
+		_tris.contents, _ntris);
+	t_fluid *fl = &sim->fluid;
+	if (fl->wet)
+	{
+		if (_wetTex.width != (NSUInteger)fl->wet_n)
+		{
+			MTLTextureDescriptor *wd = [MTLTextureDescriptor
+				texture2DDescriptorWithPixelFormat:MTLPixelFormatRG32Float
+				width:fl->wet_n height:fl->wet_n mipmapped:NO];
+			_wetTex = [_device newTextureWithDescriptor:wd];
+		}
+		/*
+		** El borde de una mancha de agua es suave: se difumina la humedad
+		** (dos pasadas de caja 5x5); la altura se deja tal cual.
+		*/
+		int wn = fl->wet_n;
+		static float *blur;
+		static float *tmp;
+		if (!blur)
+		{
+			blur = malloc(sizeof(float) * 2 * wn * wn);
+			tmp = malloc(sizeof(float) * wn * wn);
+		}
+		memcpy(blur, fl->wet, sizeof(float) * 2 * wn * wn);
+		for (int pass = 0; pass < 2; pass++)
+		{
+			for (int z = 0; z < wn; z++)
+				for (int x = 0; x < wn; x++)
+				{
+					float sum = 0;
+					for (int k = -2; k <= 2; k++)
+						sum += blur[(z * wn + MIN(MAX(x + k, 0), wn - 1)) * 2];
+					tmp[z * wn + x] = sum / 5;
+				}
+			for (int z = 0; z < wn; z++)
+				for (int x = 0; x < wn; x++)
+				{
+					float sum = 0;
+					for (int k = -2; k <= 2; k++)
+						sum += tmp[MIN(MAX(z + k, 0), wn - 1) * wn + x];
+					blur[(z * wn + x) * 2] = sum / 5;
+				}
+		}
+		[_wetTex replaceRegion:MTLRegionMake2D(0, 0, wn, wn)
+			mipmapLevel:0 withBytes:blur bytesPerRow:wn * 8];
+		_wet = simd_make_float4(fl->wet_lo.x, fl->wet_lo.y, fl->wet_cell,
+			fl->wet_n);
+	}
+	[self buildMeshStructure];
+}
+
+/*
+** Imagen de calidad sin denoiser: spp muestras de luz global sumadas en la
+** GPU (dos texturas en ping-pong) y un ultimo paso que divide y aplica el
+** tonemapping.
+*/
+
+- (void)renderAccum:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+{
+	[self accumulate:out samples:spp frame:frame first:YES];
+	[self resolveAccum:out];
+}
+
+/*
+** Suma spp muestras mas a lo acumulado (first: empieza de cero). Se puede
+** llamar varias veces por imagen moviendo la escena entre medias: asi sale
+** el desenfoque de movimiento de una camara real.
+*/
+
+- (void)accumulate:(id<MTLTexture>)out samples:(int)spp frame:(int)frame
+	first:(BOOL)first
+{
+	if (!_accA || _accA.width != out.width || _accA.height != out.height)
+	{
+		_accA = [self privateTexture:MTLPixelFormatRGBA32Float w:out.width
+			h:out.height usage:MTLTextureUsageShaderRead
+			| MTLTextureUsageShaderWrite];
+		_accB = [self privateTexture:MTLPixelFormatRGBA32Float w:out.width
+			h:out.height usage:MTLTextureUsageShaderRead
+			| MTLTextureUsageShaderWrite];
+	}
+	if (!_denoiser || _denoiser.outputWidth != out.width)
+	{
+		id<MTLCommandBuffer> warm = [_queue commandBuffer];
+		[self encodeGITo:out scale:1 buffer:warm];
+		[warm commit];
+		[warm waitUntilCompleted];
+	}
+	if (first)
+	{
+		_accSrc = _accA;
+		_accCount = 0;
+	}
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	for (int s = 0; s < spp; s++)
+	{
+		id<MTLTexture> dst = _accSrc == _accA ? _accB : _accA;
+		_frame = frame * 4096 + _accCount;
+		_accumMode = _accCount == 0 ? 1 : 2;
+		[self encodePass:4 to:dst base:_accSrc buffer:cmd];
+		_accSrc = dst;
+		_accCount++;
+	}
+	_accumMode = 0;
+	[cmd commit];
+	[cmd waitUntilCompleted];
+	if (cmd.error)
+		fprintf(stderr, "error GPU: %s\n", cmd.error.localizedDescription.UTF8String);
+}
+
+- (void)resolveAccum:(id<MTLTexture>)out
+{
+	id<MTLCommandBuffer> cmd = [_queue commandBuffer];
+	_accumScale = 1.0f / (_accCount > 0 ? _accCount : 1);
+	[self encodePass:5 to:out base:_accSrc buffer:cmd];
+	_accumScale = 0;
+	[cmd commit];
+	[cmd waitUntilCompleted];
 }
 
 /*
@@ -588,6 +827,55 @@ static bool		has_transparency(CGImageRef img)
 		_ninsts, (double)_ninsts * _ntris / 1e6);
 }
 
+/*
+** Cielo HDRI: se carga, se le quita el sol (que pasa a ser una luz de
+** disco con su direccion y energia reales) y se sube a la GPU. deg gira el
+** cielo alrededor del eje vertical; ev es la exposicion de la camara.
+*/
+
+- (void)loadEnv:(const char *)path rotation:(float)deg exposure:(float)ev
+{
+	t_hdri	img;
+	float	dir[3];
+	float	col[3];
+	float	cosr;
+
+	if (load_hdr(path, &img) < 0)
+	{
+		fprintf(stderr, "error: no se pudo leer el HDRI %s\n", path);
+		exit(1);
+	}
+	extract_sun(&img, dir, col, &cosr);
+	float th = deg * M_PI / 180;
+	float c = cosf(th);
+	float s = sinf(th);
+	simd_float3 world = simd_make_float3(c * dir[0] - s * dir[2], dir[1],
+		s * dir[0] + c * dir[2]);
+	_sunDir = simd_make_float4(simd_normalize(world), cosr);
+	_sunColor = simd_make_float4(col[0] / M_PI, col[1] / M_PI, col[2] / M_PI,
+		getenv("RT_NOSUN") ? 0 : 1);
+	_env = simd_make_float4(1, 1, th, ev);
+	float *rgba = malloc(sizeof(float) * 4 * img.w * img.h);
+	for (int i = 0; i < img.w * img.h; i++)
+	{
+		rgba[i * 4] = img.rgb[i * 3];
+		rgba[i * 4 + 1] = img.rgb[i * 3 + 1];
+		rgba[i * 4 + 2] = img.rgb[i * 3 + 2];
+		rgba[i * 4 + 3] = 1;
+	}
+	MTLTextureDescriptor *td = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+		width:img.w height:img.h mipmapped:NO];
+	_envTex = [_device newTextureWithDescriptor:td];
+	[_envTex replaceRegion:MTLRegionMake2D(0, 0, img.w, img.h) mipmapLevel:0
+		withBytes:rgba bytesPerRow:img.w * 16];
+	free(rgba);
+	free(img.rgb);
+	printf("HDRI %dx%d; sol hacia (%.2f, %.2f, %.2f), %.2f grados de radio, "
+		"luz (%.1f, %.1f, %.1f)\n", img.w, img.h, _sunDir.x, _sunDir.y,
+		_sunDir.z, acosf(cosr) * 180 / M_PI, col[0], col[1], col[2]);
+}
+
 - (void)useCamera:(int)index
 {
 	t_gpu_camera	*camera = &_scene->cameras[index];
@@ -601,6 +889,21 @@ static bool		has_transparency(CGImageRef img)
 	_pathStart = _position;
 	_pathYaw = _yaw;
 	printf("camara %d/%d\n", index + 1, _scene->ncameras);
+}
+
+/*
+** Eje "derecha" de la camara. Las escenas .rt originales usan el convenio
+** de mano izquierda del proyecto; los modelos .obj (Blender y demas) son de
+** mano derecha, y con el convenio antiguo se veian como en un espejo.
+*/
+
+- (simd_float3)right
+{
+	simd_float3	fwd = [self forward];
+	simd_float3	up = simd_make_float3(0, 1, 0);
+
+	return (simd_normalize(_ntris > 0 ? simd_cross(fwd, up)
+		: simd_cross(up, fwd)));
 }
 
 - (simd_float3)forward
@@ -617,13 +920,12 @@ static bool		has_transparency(CGImageRef img)
 {
 	t_gpu_frame	f;
 	simd_float3	fwd = [self forward];
-	simd_float3	right = simd_normalize(simd_cross(
-		simd_make_float3(0, 1, 0), fwd));
+	simd_float3	right = [self right];
 
 	f.origin = vec4(_position);
 	f.forward = vec4(fwd);
 	f.right = vec4(right);
-	f.up = vec4(simd_cross(fwd, right));
+	f.up = vec4(_ntris > 0 ? simd_cross(right, fwd) : simd_cross(fwd, right));
 	f.ambient = _scene->ambient;
 	f.fov = _fov;
 	f.nobjects = _scene->nobjects;
@@ -631,6 +933,13 @@ static bool		has_transparency(CGImageRef img)
 	f.samples = _samples;
 	f.nplanes = _nplanes;
 	f.ntris = _ntris;
+	f.sun_dir = _sunDir;
+	f.sun_color = _sunColor;
+	f.env = _env;
+	f.accum = _accumMode;
+	f.wet = _wet;
+	f.extra = simd_make_float4(_accumScale, _hasGlass ? 1 : 0, _focus,
+		_accumMode ? _aperture : 0);
 	f.ao_rays = getenv("RT_AO") ? atoi(getenv("RT_AO")) : 8;
 	f.frame = _frame;
 	f.nopaque = _nopaque;
@@ -665,6 +974,8 @@ static bool		has_transparency(CGImageRef img)
 	[enc setTexture:(gi ? _gNormal : base) atIndex:5];
 	[enc setTexture:(gi ? _gRough : base) atIndex:6];
 	[enc setTexture:(gi ? _gSpec : base) atIndex:7];
+	[enc setTexture:_envTex atIndex:8];
+	[enc setTexture:_wetTex atIndex:9];
 	if (pass == 3 || pass == 4)
 	{
 		f.prev_origin = _hasPrev ? _prev.origin : f.origin;
@@ -971,7 +1282,8 @@ static bool		has_transparency(CGImageRef img)
 	if (!getenv("RT_SKIP_DENOISE"))
 		[_denoiser encodeToCommandBuffer:cmd];
 	_hasPrev = true;
-	[self encodePass:5 to:texture base:_gOut buffer:cmd];
+	[self encodePass:5 to:texture base:(getenv("RT_SKIP_DENOISE") ? _gColor
+		: _gOut) buffer:cmd];
 }
 
 - (void)giReferenceAt:(float)t samples:(int)spp size:(MTLSize)size
@@ -1088,8 +1400,7 @@ static bool		has_transparency(CGImageRef img)
 - (void)move:(float)dt
 {
 	simd_float3	fwd = [self forward];
-	simd_float3	right = simd_normalize(simd_cross(
-		simd_make_float3(0, 1, 0), fwd));
+	simd_float3	right = [self right];
 	float		speed = dt * _moveSpeed * (_fast ? 3 : 1);
 
 	_position += fwd * speed * (_keys[KEY_W] - _keys[KEY_S]);
@@ -1326,6 +1637,68 @@ static void		gi_reference(Renderer *renderer, int n, const char *prefix,
 	}
 }
 
+/*
+** --video con --sim: cada imagen avanza la fisica 1/fps segundos, mueve la
+** malla y se renderiza acumulando spp muestras (RT_SPP, 32 por defecto).
+*/
+
+static void		render_sim_video(Renderer *renderer, t_sim *sim, int n,
+					const char *out, int fps)
+{
+	id<MTLTexture>	texture = [renderer offscreenTexture];
+	size_t			w = texture.width;
+	size_t			h = texture.height;
+	int				spp = getenv("RT_SPP") ? atoi(getenv("RT_SPP")) : 32;
+	char			cmd[2048];
+	CFTimeInterval	t0 = CACurrentMediaTime();
+
+	snprintf(cmd, sizeof(cmd), "ffmpeg -loglevel error -y -f rawvideo "
+		"-pix_fmt bgra -s %zux%zu -r %d -i - -c:v libx264 -preset slow "
+		"-crf 16 -pix_fmt yuv420p '%s'", w, h, fps, out);
+	FILE *pipe = popen(cmd, "w");
+	void *pixels = malloc(w * h * 4);
+	/*
+	** Obturador (RT_SHUTTER, 0,5 = 180 grados como en cine): durante esa
+	** fraccion de cada imagen la escena se mueve en RT_MB_STEPS pasos y las
+	** muestras se reparten entre ellos.
+	*/
+	float			shutter = getenv("RT_SHUTTER") ? atof(getenv("RT_SHUTTER"))
+		: 0.5f;
+	int				steps = getenv("RT_MB_STEPS") ? atoi(getenv("RT_MB_STEPS"))
+		: 8;
+	float			dt = 1.0f / fps;
+
+	steps = shutter > 0 && steps > 1 ? steps : 1;
+	[renderer pathAt:0 frame:0];
+	[renderer simStep:sim dt:0];
+	for (int i = 0; i < n; i++)
+	{
+		for (int k = 0; k < steps; k++)
+		{
+			int part = spp * (k + 1) / steps - spp * k / steps;
+			[renderer accumulate:texture samples:part frame:i first:k == 0];
+			if (steps > 1)
+				[renderer simStep:sim dt:dt * shutter / steps];
+		}
+		[renderer resolveAccum:texture];
+		[renderer simStep:sim dt:steps > 1 ? dt * (1 - shutter) : dt];
+		[texture getBytes:pixels bytesPerRow:w * 4
+			fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+		fwrite(pixels, 1, w * h * 4, pipe);
+		if (getenv("RT_DUMP") && (i % 30 == 0 || i == n - 1))
+		{
+			char name[1200];
+			snprintf(name, sizeof(name), "%s_f%03d", getenv("RT_DUMP"), i);
+			save_png(texture, name);
+		}
+		fprintf(stderr, "\rimagen %d/%d", i + 1, n);
+	}
+	pclose(pipe);
+	free(pixels);
+	printf("\nvideo %s: %d imagenes %zux%zu, %d muestras, %.1f s en total\n",
+		out, n, w, h, spp, CACurrentMediaTime() - t0);
+}
+
 static void		run_window(Renderer *renderer, t_gpu_scene *scene)
 {
 	NSApplication	*app = [NSApplication sharedApplication];
@@ -1380,6 +1753,39 @@ int				main(int argc, char **argv)
 		** la escena del .rt, que sigue aportando camara, luces y resolucion.
 		*/
 		const char *obj_path = NULL;
+		const char *sim_name = NULL;
+		for (int i = 1; i + 1 < argc; i++)
+			if (strcmp(argv[i], "--sim") == 0)
+			{
+				sim_name = argv[i + 1];
+				for (int j = i; j + 2 <= argc; j++)
+					argv[j] = argv[j + 2];
+				argc -= 2;
+				break ;
+			}
+		const char *env_path = NULL;
+		float env_rot = 0;
+		float env_ev = 1;
+		for (int i = 1; i + 1 < argc; i++)
+			if (strcmp(argv[i], "--env") == 0)
+			{
+				int k = 2;
+				env_path = argv[i + 1];
+				if (i + 2 < argc && argv[i + 2][0] != '-')
+				{
+					env_rot = atof(argv[i + 2]);
+					k = 3;
+					if (i + 3 < argc && argv[i + 3][0] != '-')
+					{
+						env_ev = atof(argv[i + 3]);
+						k = 4;
+					}
+				}
+				for (int j = i; j + k <= argc; j++)
+					argv[j] = argv[j + k];
+				argc -= k;
+				break ;
+			}
 		for (int i = 1; i + 1 < argc; i++)
 			if (strcmp(argv[i], "--obj") == 0)
 			{
@@ -1391,6 +1797,7 @@ int				main(int argc, char **argv)
 			}
 		export_scene(argv[1], &scene);
 		float model_size = 0;
+		static t_sim sim;
 		t_gpu_mesh mesh;
 		memset(&mesh, 0, sizeof(mesh));
 		if (obj_path)
@@ -1414,8 +1821,12 @@ int				main(int argc, char **argv)
 			mesh.center = (lo + hi) * 0.5f;
 			mesh.size = hi - lo;
 		}
+		if (sim_name && (!obj_path || sim_setup(&sim, sim_name, &mesh) < 0))
+			return (1);
 		renderer = [[Renderer alloc] initWithScene:&scene
 			mesh:obj_path ? &mesh : NULL];
+		if (env_path)
+			[renderer loadEnv:env_path rotation:env_rot exposure:env_ev];
 		/*
 		** Con modelo: velocidad de paseo proporcional a su tamano (~4 m/s en
 		** San Miguel) y reescalado temporal activado en la ventana.
@@ -1434,6 +1845,9 @@ int				main(int argc, char **argv)
 		}
 		else if (argc >= 6 && strcmp(argv[2], "--giref") == 0)
 			gi_reference(renderer, atoi(argv[3]), argv[4], atoi(argv[5]));
+		else if (argc >= 5 && strcmp(argv[2], "--video") == 0 && sim_name)
+			render_sim_video(renderer, &sim, atoi(argv[3]), argv[4],
+				argc >= 6 ? atoi(argv[5]) : 30);
 		else if (argc >= 5 && strcmp(argv[2], "--video") == 0)
 			render_video(renderer, atoi(argv[3]), argv[4],
 				argc >= 6 ? atoi(argv[5]) : 30);

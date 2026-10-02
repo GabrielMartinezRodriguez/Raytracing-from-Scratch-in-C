@@ -1,12 +1,23 @@
 #ifndef OBJ_LOADER_H
 # define OBJ_LOADER_H
+# include <stdint.h>
 # include "shared.h"
+
+/*
+** Material PBR: color (map_Kd), relieve (map_Bump, mapa de normales),
+** rugosidad (Pr / map_Pr) y metalicidad (Pm / map_Pm).
+*/
 
 typedef struct	s_mesh_material
 {
 	char		name[128];
 	char		texture[1024];
+	char		normal_map[1024];
+	char		rough_map[1024];
+	char		metal_map[1024];
 	simd_float4	kd;
+	float		roughness;
+	float		metallic;
 }				t_mesh_material;
 
 /*
@@ -28,6 +39,9 @@ typedef struct	s_gpu_mesh
 	size_t			map_size;
 	simd_float3		center;
 	simd_float3		size;
+	uint32_t		*tri_obj;
+	char			(*obj_names)[64];
+	int				nobjs;
 }				t_gpu_mesh;
 
 /*
